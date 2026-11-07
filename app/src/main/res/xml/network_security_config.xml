@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    局域网网关走明文 HTTP（http://192.168.x.x:7788），
+    因此这里允许 cleartext；公网连接仍由 HTTPS + deviceToken 保护。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

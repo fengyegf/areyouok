@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+   设备令牌与 Keystore 密钥绑定，恢复到其他设备后无法解密；
+   因此从云备份与设备迁移中排除，避免无意义的密文迁移。
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude
+            domain="sharedpref"
+            path="gateway_tokens.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude
+            domain="sharedpref"
+            path="gateway_tokens.xml" />
+    </device-transfer>
+</data-extraction-rules>
