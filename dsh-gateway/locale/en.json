@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DSH Gateway",
+    "description": "Forwards this machine's DSH sessions to a phone: QR pairing, device management and the LAN/public switches live on this page under Installed plugins."
+  }
+}

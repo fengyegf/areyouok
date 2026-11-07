@@ -4,7 +4,7 @@
  * Covers:
  *   - `classifyAddress` (util) across loopback / RFC1918 / CGNAT / link-local /
  *     ULA / public IPv4 / public IPv6 / mapped addresses,
- *   - `AuthService.guard` for the LAN port, the public HTTPS port and `/admin`,
+ *   - `AuthService.guard` for the LAN port and the public HTTPS port,
  *   - pairing: one-shot codes, expiry, failure rate limiting, device eviction,
  *   - token verification and revocation,
  *   - full-stack: the `httpsPort > 0` public edge really demands a Bearer token
@@ -165,12 +165,20 @@ describe('AuthService.guard', () => {
     assert.equal(wrong.status, 401)
   })
 
-  it('keeps /admin loopback-only', async () => {
+  it('has no administrative route left to exempt', async () => {
+    // `/admin` used to bypass the LAN pairing switch from loopback. The page is
+    // gone, so a LAN peer that used to hit 403 there now meets the same rule as
+    // every other path: allowed while `lanRequirePairing` is off.
     const { auth } = await makeAuth()
-    assert.equal(auth.guard({ remoteAddress: '127.0.0.1', localPort: LAN_PORT, headers: {}, path: '/admin' }).ok, true)
+    const loopback = auth.guard({ remoteAddress: '127.0.0.1', localPort: LAN_PORT, headers: {}, path: '/admin' })
+    assert.equal(loopback.ok, true)
+    const lan = auth.guard({ remoteAddress: '192.168.1.20', localPort: LAN_PORT, headers: {}, path: '/admin/api/state' })
+    assert.equal(lan.ok, true)
+
+    auth.setLanRequirePairing(true)
     const denied = auth.guard({ remoteAddress: '192.168.1.20', localPort: LAN_PORT, headers: {}, path: '/admin/api/state' })
     assert.equal(denied.ok, false)
-    assert.equal(denied.status, 403)
+    assert.equal(denied.status, 401)
   })
 
   it('always requires a token on the public HTTPS port, even from loopback', async () => {

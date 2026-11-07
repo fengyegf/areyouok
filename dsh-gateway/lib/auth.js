@@ -8,13 +8,16 @@
  *      (`createPairingCode` / `pair`).
  *
  * Policy (handoff §5.6, impl-plan §3.6):
- *   - loopback is always allowed on the LAN HTTP port (including `/admin`),
+ *   - loopback is always allowed on the LAN HTTP port,
  *   - `lan` sources are allowed unless `lanRequirePairing` is on,
  *   - `public` sources are rejected with 403 on the LAN HTTP port,
  *   - the HTTPS public port always requires a device token, whatever the
  *     source address,
- *   - `/v1/pair` is the one pre-auth route (rate limited),
- *   - `/admin*` is loopback-only.
+ *   - `/v1/pair` is the one pre-auth route (rate limited).
+ *
+ * The `/admin` page this module used to exempt is gone: the management API now
+ * lives on the DSH host web server, behind the host's own browser login, so no
+ * listener here answers an administrative route at all.
  *
  * Secrets: tokens are 32 random bytes (base64url); the persisted device table
  * only ever holds `sha256(token)`. Pairing codes are held in memory, are
@@ -136,7 +139,6 @@ export class AuthService {
     const securePort = Number(this.config.httpsPort) > 0 ? Number(this.config.httpsPort) : 0
     const onSecurePort = securePort !== 0 && Number(localPort) === securePort
     const isPair = routePath === '/v1/pair'
-    const isAdmin = routePath === '/admin' || routePath.startsWith('/admin/')
 
     if (onSecurePort) {
       // Public HTTPS edge: pairing is the only pre-auth route; everything
@@ -150,10 +152,6 @@ export class AuthService {
     // LAN HTTP edge (`:7788`).
     if (kind === 'public') {
       return deny(403, 'forbidden_source', 'the LAN port only accepts private source addresses')
-    }
-    if (isAdmin) {
-      if (kind !== 'loopback') return deny(403, 'forbidden_source', '/admin is loopback only')
-      return { ok: true, kind, device: null }
     }
     if (isPair) return { ok: true, kind, device: null }
     if (kind === 'loopback') return { ok: true, kind, device: null }

@@ -1,6 +1,6 @@
 # dsh-gateway
 
-DeepSeek Harness（DSH）局域网/公网转发网关插件：把本机 DSH 的**会话、消息、审批/提问能力**以稳定的 `/v1` 协议暴露给手机 APK，并自带 mDNS 发现、扫码配对、设备令牌、事件补发与管理页。
+DeepSeek Harness（DSH）局域网/公网转发网关插件：把本机 DSH 的**会话、消息、审批/提问能力**以稳定的 `/v1` 协议暴露给手机 APK，并自带 mDNS 发现、扫码配对、设备令牌、事件补发，以及内置在「插件 → 已安装插件」里的配置页。
 
 - 设计文档：`docs/dsh-gateway-handoff.md`
 - 实现契约：`docs/dsh-gateway-impl-plan.md`
@@ -13,7 +13,9 @@ DSH 桌面 App (127.0.0.1:随机端口)
 dsh-gateway 插件（跑在 DSH 进程里）
    · 自建监听：LAN 7788(HTTP) / 公网 7789(HTTPS)
    · /v1 REST + /v1/stream WS，事件 ring/seq/补发，审批跨断线
-   · mDNS 广播 _dshgw._tcp；/admin 管理页（仅回环）
+   · mDNS 广播 _dshgw._tcp
+   · 配置页（lib/client.js）→ 插件 → 已安装插件 → dsh-gateway
+   · 配置页后端（lib/panel-routes.js）→ 宿主 webServer: /plugins/dsh-gateway/*
    ▲
 APK
 ```
@@ -56,7 +58,7 @@ pnpm install
 
 3. **完全退出并重启 DeepSeek Harness**（插件随进程加载；当前会话会结束）。
 
-> 验证：DSH 日志出现 `[dsh-gateway] listening lan=7788 public=7789`；浏览器打开 <http://127.0.0.1:7788/admin> 能看到管理页；`curl http://127.0.0.1:7788/v1/health` 返回 `{"ok":true,...}`。
+> 验证：DSH 日志出现 `[dsh-gateway] listening lan=7788 public=7789`；侧边栏「插件 → 已安装插件 → dsh-gateway」能打开配置页并看到运行状态；`curl http://127.0.0.1:7788/v1/health` 返回 `{"ok":true,...}`。
 
 ### 卸载
 
@@ -93,6 +95,8 @@ pnpm install
 | `idleTimeoutMs` | 45000 | WS 判死阈值 |
 | `name` | 主机名 | 网关显示名（mDNS/health 用） |
 
+> `lanRequirePairing` 与 `mdns` 也可以在配置页里直接切换，但那只改内存里的运行时值（`mdns` 还需重启 DSH 才换广告器）；要长期生效仍请写进上面的 `config`。
+
 ## `/v1` 接口
 
 完整契约见 `docs/dsh-gateway-handoff.md` §6 与 `docs/dsh-gateway-impl-plan.md` §4。摘要：
@@ -119,27 +123,65 @@ WS   /v1/stream                         长连接（hello/sub/ack/ping）
 
 - `7788`：回环全放行；私网放行（`lanRequirePairing=true` 时需 `Authorization: Bearer <deviceToken>`）；公网来源 403。
 - `7789`：任何来源都需要设备令牌；HTTPS 自签证书，配对二维码携带证书 SHA-256 指纹供 APK 固定校验。
-- **局域网连接走明文 HTTP（7788），不需要证书**：mDNS 发现、管理页二维码、`dshgw://pair?lan=http://…` 都优先给局域网 HTTP 地址；APK 在同一网段时不会触碰 TLS，也不需要配对码（`lanRequirePairing=true` 时仍可在 LAN 上走 HTTP 配对换令牌）。公网 HTTPS 只在局域网不可达时使用。
-- `/admin`：仅回环。
+- **局域网连接走明文 HTTP（7788），不需要证书**：mDNS 发现、配置页二维码、`dshgw://pair?lan=http://…` 都优先给局域网 HTTP 地址；APK 在同一网段时不会触碰 TLS，也不需要配对码（`lanRequirePairing=true` 时仍可在 LAN 上走 HTTP 配对换令牌）。公网 HTTPS 只在局域网不可达时使用。
+- 网关的两个监听**不再提供任何管理页面或管理接口**：`/admin` 及其 `/admin/api/*` 已删除，只剩 `/v1`。
 
-## 管理页
+## 配置页（内置在插件列表里）
 
-<http://127.0.0.1:7788/admin>（仅本机可访问）
+不再是独立网页。管理界面现在是插件自带的配置页，位置：
 
-- 网关状态：DSH 连接、监听端口、mDNS、在线设备数
-- 生成配对二维码（**优先局域网 HTTP 地址** + 公网 HTTPS 回退 + 一次性 code + 证书指纹 + 主机名，10 分钟有效）
-- 设备列表：名称、最近活跃、来源 IP、撤销
-- 公网地址枚举结果
-- 开关提示：`lanRequirePairing`、`mdns`（修改后需重启插件生效）
+**侧边栏 → 插件 → 已安装插件 → dsh-gateway → 「配置」**（包页面上该行的齿轮/箭头，或直接点该行）
+
+页面内容（折叠卡片 + 分区标签，形态与 `dsh-connect-workbuddy` 的设置卡一致）：
+
+- 卡片头：插件图标、标题、一句话说明、右侧展开箭头（真 `<button aria-expanded>`，可键盘操作）
+- **运行状态**：DSH 连接、局域网 HTTP / 公网 HTTPS 端口、mDNS、已配对设备数、已运行时长
+- **扫码配对**：生成一次性 `dshgw://pair?…` 配对码，页内直接画出二维码（**优先局域网 HTTP 地址** + 公网 HTTPS 回退 + 一次性 code + 证书指纹 + 主机名，10 分钟有效）
+- **已配对设备**：名称、设备 ID、最近来源、最近活跃、撤销
+- **开关**：`lanRequirePairing`、`mdns`（内存生效；`mdns` 需重启）
+
+四个分区是同一个页面的 tab，非活动分区保持挂载（`hidden`），所以来回切换不会重新拉取、刚生成的配对码也还在。卡片收起时不轮询；`plugins.bundle.config`（包页面）与 `plugins.row.config`（行配置页）都注册这张卡，两个入口看到的是同一份实现。
+
+实现分两半：
+
+| 文件 | 运行位置 | 作用 |
+|---|---|---|
+| `lib/client.js` | 浏览器（`dsh.client`，`plugins.bundle.config` + `plugins.row.config` 槽） | 页面本身：折叠卡片、分区标签、状态卡片、二维码 SVG、设备表、开关；只用 `--dsw-alias-*` 主题令牌与 `ctx.locale` 文案 |
+| `lib/panel-routes.js` | Host（`ctx.webServer.register`） | 页面调用的 JSON 接口，挂在宿主服务器上，复用宿主的浏览器登录与 Host/Origin 栅栏 |
+| `lib/panel.js` | Host | 纯数据：地址枚举、`dshgw://` 深链、二维码矩阵、状态快照 |
+
+接口（全部 `{ok:true,…}` / `{ok:false,error:{code,message}}`）：
+
+```
+GET    /plugins/dsh-gateway/state           面板快照
+GET    /plugins/dsh-gateway/pairing         当前配对码（无则 null）
+POST   /plugins/dsh-gateway/pairing         生成新配对码
+DELETE /plugins/dsh-gateway/devices?deviceId=  撤销设备
+PATCH  /plugins/dsh-gateway/config          切换 lanRequirePairing / mdns
+```
+
+这些路由挂在**宿主的** webServer 上（而不是网关自己的 7788/7789），因此从 Web UI 的同源页面就能直接调用，且默认继承宿主的浏览器会话校验；`connection.requestRejection` 缺失时回退到回环 Host + 同源 Origin 自检，栅栏抛错一律按拒绝处理（fail-closed）。
 
 ## 开发
 
 ```bash
 cd dsh-gateway
 node --check lib/*.js                    # 语法检查
-npm test                                 # 不依赖真实 DSH 的全链路测试（150 用例，mock DSH）
+npm test                                 # 不依赖真实 DSH 的全链路测试（mock DSH）
 node test/smoke.mjs                      # 端到端冒烟，成功打印 SMOKE OK
 ```
+
+测试分层：
+
+| 文件 | 覆盖 |
+|---|---|
+| `test/unit.test.mjs` | normalize / hub 纯逻辑 |
+| `test/auth.test.mjs` | 来源策略、设备令牌、配对码 |
+| `test/rest.test.mjs` | `/v1` REST 全链路（含「LAN 监听不再有 /admin」） |
+| `test/stream.test.mjs` | WS 协议、补发、心跳 |
+| `test/panel.test.mjs` | 配置页后端：路由表、状态、配对、撤销、开关、405/403、fail-closed |
+| `test/client.test.mjs` | 浏览器半：模块加载契约、槽位注册、语言字典、渲染不崩 |
+| `test/tls.test.mjs` | 自签证书与指纹 |
 
 测试体系说明见 `docs/dsh-gateway-impl-plan.md` §6；DSH 内部协议的事实以 `docs/dsh-internal-api-notes.md` 为准（含运行实例实测，wire args 与交接文档示例不同）。修改代码后需**完全重启 DSH** 生效（HMR 不可靠）。
 
@@ -160,13 +202,16 @@ node tools/install-gateway.mjs --remove --apply  # 卸载
 | WS 秒断 | 帧 JSON 非法 / 未回 pong / 事件循环阻塞 |
 | 审批不回 | `clientId` 是否最新、`$events/result` 是否 200、eventId 是否已结算 |
 | mDNS 发现不到 | 路由器多播/AP 隔离；用 APK 手输地址兜底 |
-| 手机扫码打不开公网 | 检查 IPv6 前缀/防火墙放行 7789；管理页显示的公网地址是否可达 |
+| 手机扫码打不开公网 | 检查 IPv6 前缀/防火墙放行 7789；配置页显示的公网地址是否可达 |
+| 插件页一直「正在读取…」 | 宿主 `webServer` 未注册到 `/plugins/dsh-gateway/*`：看日志有无 `in-app plugin panel did not mount`；旧版 DSH 缺少 `ctx.webServer.register` 时配置页无后端 |
+| 插件页 403 | 宿主 `connection.requestRejection` 拒绝了请求（Host/Origin 不被信任，或浏览器会话未登录）；同源打开 Web UI 再试 |
 
 ## 兼容性
 
-- DSH `0.2.2-rc.1`（已针对该版本源码核实回环协议）。
+- DSH `0.2.2-rc.1`（已针对该版本源码核实回环协议与配置页槽位）。
 - Node.js `>= 20`（DSH 桌面运行时自带）。
 - 运行时依赖：`ws`、`bonjour-service`、`selfsigned`、`ipaddr.js`、`qrcode`、`@deepseek-ai/schemastery`。
+- 浏览器半不引入任何 `@deepseek-ai/dsh-client-*` 模块，只依赖 `slots` / `locale` 两个公开客户端服务与 `fetch`。
 
 ## 许可
 

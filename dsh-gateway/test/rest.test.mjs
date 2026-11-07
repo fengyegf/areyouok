@@ -387,29 +387,25 @@ describe('/v1 REST', { skip: reason }, () => {
     assert.equal(recovered.json.ok, true)
   })
 
-  it('serves the admin page to loopback only', async () => {
-    const page = await request(base, '/admin')
-    assert.equal(page.status, 200)
-    assert.match(page.headers.get('content-type') ?? '', /text\/html/)
-    assert.match(page.text, /dsh/i)
-
-    const state = await request(base, '/admin/api/state')
-    assert.equal(state.status, 200)
-    assert.equal(state.json.ok, true)
-    assert.equal(typeof state.json.ports, 'object')
-    assert.equal(typeof state.json.dsh?.connected, 'boolean')
-    assert.ok(Array.isArray(state.json.devices))
+  it('no longer serves an administrative page on the LAN listener', async () => {
+    // The /admin page is gone: the panel moved into the Web UI, and its host
+    // routes live on the DSH web server (see panel.test.mjs), not here.
+    for (const path of ['/admin', '/admin/api/state', '/admin/api/pairing']) {
+      const response = await request(base, path)
+      assert.equal(response.status, 404, `${path} must not exist on the LAN edge`)
+      assert.equal(response.json.ok, false)
+    }
   })
 
   it('advertises LAN pairing over plain HTTP without a certificate', async () => {
-    const state = await request(base, '/admin/api/state')
-    assert.ok(Array.isArray(state.json.lanUrls))
-    for (const url of state.json.lanUrls) assert.match(url, /^http:\/\//, 'LAN URLs must be plain HTTP')
-    for (const url of state.json.publicUrls) assert.match(url, /^https:\/\//, 'public URLs keep HTTPS')
+    // The snapshot is built by the same code the panel routes use; assert the
+    // URL policy on the gateway object so the LAN edge stays page-free.
+    const state = await gateway.api.panelState()
+    assert.ok(Array.isArray(state.lanUrls))
+    for (const url of state.lanUrls) assert.match(url, /^http:\/\//, 'LAN URLs must be plain HTTP')
+    for (const url of state.publicUrls) assert.match(url, /^https:\/\//, 'public URLs keep HTTPS')
 
-    const response = await request(base, '/admin/api/pairing', { method: 'POST', body: {} })
-    assert.equal(response.status, 200)
-    const pairing = response.json.pairing
+    const pairing = await gateway.api.panelPairingCreate()
     assert.equal(typeof pairing.code, 'string')
     // This gateway has httpsPort=0, so the pairing payload is LAN-only.
     assert.deepEqual(pairing.publicUrls, [])
