@@ -54,8 +54,8 @@
     <string name="settings_notifications_approval_desc">有工具审批时推送到通知栏，可直接在通知上处理</string>
     <string name="settings_notifications_question_title">提问提醒</string>
     <string name="settings_notifications_question_desc">DSH 向你提问时推送到通知栏</string>
-    <string name="settings_notifications_system_title">系统通知设置</string>
-    <string name="settings_notifications_system_desc">管理通知渠道、横幅与声音</string>
+    <string name="settings_notifications_system_title">审批与提问通知设置</string>
+    <string name="settings_notifications_system_desc">在系统设置中开启悬浮通知和声音</string>
     <string name="settings_about_title">基础信息</string>
     <string name="settings_app_label">应用</string>
     <string name="settings_device_name">设备名称</string>

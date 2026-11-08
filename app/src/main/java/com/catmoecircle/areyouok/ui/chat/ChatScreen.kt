@@ -118,6 +118,7 @@ import com.catmoecircle.areyouok.gateway.repository.SessionProject
 import com.catmoecircle.areyouok.gateway.repository.SessionProjectGrouping
 import com.catmoecircle.areyouok.gateway.repository.ConnectionState
 import com.catmoecircle.areyouok.gateway.repository.ConnectionPhase
+import com.catmoecircle.areyouok.gateway.service.GatewayChannels
 import com.catmoecircle.areyouok.gateway.service.GatewayService
 import com.catmoecircle.areyouok.gateway.transport.GatewayEndpoint
 import com.catmoecircle.areyouok.gateway.transport.toUserMessage
@@ -1392,19 +1393,28 @@ private fun isNotificationPermissionGranted(context: Context): Boolean {
     ) == PackageManager.PERMISSION_GRANTED
 }
 
-/** 打开本应用的系统通知设置（权限被永久拒绝时的兜底入口）。 */
+/** 直接打开“审批与提问”渠道，方便用户开启系统控制的悬浮通知与声音。 */
 private fun openNotificationSettings(context: Context) {
-    val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+    val channelIntent = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
         .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+        .putExtra(Settings.EXTRA_CHANNEL_ID, GatewayChannels.INTERVENTIONS)
         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    runCatching { context.startActivity(intent) }.onFailure {
+    runCatching { context.startActivity(channelIntent) }.onFailure {
         runCatching {
             context.startActivity(
-                Intent(
-                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    Uri.fromParts("package", context.packageName, null),
-                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             )
+        }.onFailure {
+            runCatching {
+                context.startActivity(
+                    Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.fromParts("package", context.packageName, null),
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }
         }
     }
 }

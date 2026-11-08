@@ -10,8 +10,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
 import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
@@ -361,7 +363,8 @@ class GatewayService : Service() {
 /** 通知渠道定义（connectedDevice 语义：常驻低打扰 + 审批高打扰）。 */
 object GatewayChannels {
     const val CONNECTION = "gateway_connection"
-    const val INTERVENTIONS = "gateway_interventions"
+    const val INTERVENTIONS = "gateway_interventions_v2"
+    private const val LEGACY_INTERVENTIONS = "gateway_interventions"
 
     fun ensure(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
@@ -380,8 +383,18 @@ object GatewayChannels {
             NotificationManager.IMPORTANCE_HIGH,
         ).apply {
             description = "工具审批与 DSH 提问，可直接在通知上回答"
+            setSound(
+                Settings.System.DEFAULT_NOTIFICATION_URI,
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build(),
+            )
             enableVibration(true)
         }
+        // 渠道的重要性和声音一旦被用户或系统降级，App 无法在原渠道上恢复。
+        // 删除旧渠道，让新版本按高优先级和系统默认声音重新建立。
+        manager.deleteNotificationChannel(LEGACY_INTERVENTIONS)
         manager.createNotificationChannels(listOf(connection, interventions))
     }
 }
