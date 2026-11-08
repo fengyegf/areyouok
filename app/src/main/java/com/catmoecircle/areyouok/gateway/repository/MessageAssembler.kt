@@ -196,6 +196,8 @@ class MessageAssembler {
         arguments: String? = null,
         /** 结果事件：历史里的工具调用没有 callId，结果到达时并回最近一条等待中的调用行。 */
         mergeWithPending: Boolean = false,
+        /** 调用事件为 true、结果事件为 false；工作步骤标题据此显示实时活动。 */
+        running: Boolean = false,
     ): Boolean {
         if (callId != null) {
             val existing = items.indexOfLast { it.role == ChatRole.TOOL && it.callId == callId }
@@ -206,6 +208,7 @@ class MessageAssembler {
                     meta = toolName ?: current.meta,
                     seq = seq ?: current.seq,
                     arguments = arguments ?: current.arguments,
+                    running = running,
                 )
                 return false
             }
@@ -224,6 +227,7 @@ class MessageAssembler {
                     meta = toolName ?: current.meta,
                     seq = seq ?: current.seq,
                     arguments = arguments ?: current.arguments,
+                    running = running,
                 )
                 return false
             }
@@ -239,6 +243,7 @@ class MessageAssembler {
             meta = toolName,
             callId = callId,
             arguments = arguments,
+            running = running,
         )
         return true
     }

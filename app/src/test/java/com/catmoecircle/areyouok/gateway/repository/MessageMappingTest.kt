@@ -33,12 +33,14 @@ class MessageMappingTest {
     }
 
     @Test
-    fun `background job notice is a system line not a user message`() {
+    fun `background job notice is hidden from the chat timeline`() {
+        // 后台任务完成通知只是上下文注入；桌面端 Chat 同样不展示，
+        // 任务输出已经在工具结果行里。
         val notice = message(
             "background job pwsh-38486642c01e4a32 (pwsh: adb shell screenrecord …) finished [status: completed, exit code: 0]. Output:\ndone",
             MessageSource(kind = "tool-jobs", form = "notice", summary = "pwsh adb screenrecord"),
         )
-        assertEquals(ChatRole.SYSTEM, MessageMapping.userRole(notice))
+        assertNull(MessageMapping.userRole(notice))
         assertEquals("tool-jobs", MessageMapping.noticeMeta(notice))
     }
 

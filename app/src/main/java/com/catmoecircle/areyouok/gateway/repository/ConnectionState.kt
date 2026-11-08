@@ -57,8 +57,10 @@ data class ChatMessage(
     val meta: String? = null,
     /** 工具消息的 callId，用于把 call/result 合并成一条。 */
     val callId: String? = null,
-    /** 工具调用参数（JSON 文本），「详细 / 完全展开」档位展示。 */
+    /** 工具调用参数（JSON 文本），展开工具行时展示。 */
     val arguments: String? = null,
+    /** 工具已派发、结果尚未返回：工作步骤标题据此显示「正在运行命令」等实时状态。 */
+    val running: Boolean = false,
 )
 
 enum class NoticeLevel { INFO, WARN, ERROR }

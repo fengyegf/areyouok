@@ -387,6 +387,7 @@ class GatewayRepository(
                     callId = data.string("callId") ?: data.string("id"),
                     summary = data.string("summary") ?: data.string("title"),
                     arguments = data.string("arguments"),
+                    running = true,
                 )
                 publishMessages()
             }
@@ -398,6 +399,7 @@ class GatewayRepository(
                     callId = data.string("callId") ?: data.string("id"),
                     summary = data.string("summary") ?: data.string("text") ?: data.string("result"),
                     mergeWithPending = true,
+                    running = false,
                 )
                 publishMessages()
             }

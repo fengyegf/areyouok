@@ -10,21 +10,25 @@ import com.catmoecircle.areyouok.gateway.protocol.MessageSource
  *
  * - `user`：真人输入（普通发送、排队、中途 steer 插入都算）→ 用户气泡；
  * - `runtime-context` / `skill-catalog` / `time-context` / `user-approval` /
- *   `compact-checkpoint`：模型侧上下文 → 聊天里不展示；
- * - `tool-jobs`（后台任务完成通知）/ `subagent-settled` / `agent-message` 等：
- *   系统通知 → 系统提示行，**绝不能画成用户自己发的话**。
+ *   `compact-checkpoint` / `tool-jobs`：模型侧上下文或后台任务完成通知 →
+ *   聊天里不展示（与桌面端一致：任务输出已经在工具结果行里）；
+ * - `subagent-settled` / `agent-message` 等：系统通知 → 系统提示行，
+ *   **绝不能画成用户自己发的话**。
  *
  * 老网关（本轮之前）不返回 `source`，退回按文本前缀识别机器注入消息。
  */
 internal object MessageMapping {
 
-    /** 模型侧上下文：聊天里完全不展示。 */
+    /** 模型侧上下文与后台任务通知：聊天里完全不展示。 */
     private val HIDDEN_SOURCE_KINDS = setOf(
         "runtime-context",
         "skill-catalog",
         "time-context",
         "user-approval",
         "compact-checkpoint",
+        // 后台任务完成通知（“background job … finished”）：只是上下文注入，
+        // 输出已经在工具结果里；显示出来既打断分段折叠，也不是对话内容。
+        "tool-jobs",
     )
 
     /** 无 `source` 时按文本前缀兜底过滤的机器注入消息。 */

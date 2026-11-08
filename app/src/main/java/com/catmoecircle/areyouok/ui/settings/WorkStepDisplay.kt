@@ -4,21 +4,22 @@ import androidx.annotation.StringRes
 import com.catmoecircle.areyouok.R
 
 /**
- * 「工作步骤显示」详细程度：控制聊天里思考链 / 工具调用（工作步骤）的展示方式。
+ * 「工作步骤展示」详细程度：对齐 DSH 桌面客户端的四档策略。
  *
- * 前三档共用同一套两层折叠：
- * 1. 一轮（user → 下一条 user 之间）完成后，思考链、工具调用和中间说明整体折叠成
- *    一条「工作步骤 · N 项」分组，点按分组才展开组内每一行；
- * 2. 组内每行（思考过程 / 工具调用）仍是独立折叠项，再点按才看完整内容。
+ * 前三档共用同一套「工作步骤分组」：
+ * 1. 一轮（user → 下一条 user 之间）里连续的思考 / 工具调用收成一个分组，
+ *    助手回复把分组截断——回答、调工具、再回答、再调工具会出现多个分组；
+ * 2. 分组默认收起，标题一行显示状态：运行中「正在运行命令 · git status」，
+ *    结束后「已读取文件、执行了命令」；
+ * 3. 点按分组才展开组内每一行，行内再点按看参数与输出。
  *
- * [EXPANDED] 不再把工作步骤收进分组：思考、工具与中间说明按普通对话逐条展示，
- * 但每行自身仍默认折叠，点按才看参数与输出。
+ * [EXPANDED] 不再分组：思考、工具按普通消息逐条展示，但每行自身仍默认折叠。
  *
- * 档位决定折叠行「露出多少」：
- * - [CONCISE]  只露出「思考过程 / 工具调用」标签，不显示任何摘要；
- * - [STANDARD] 在简洁基础上露出思考开头一行与工具名；
- * - [DETAILED] 在标准基础上再露出工具输出首行（对齐上一版「标准」）；
- * - [EXPANDED] 同样露出工具名与输出首行，但不折叠成工作步骤分组。
+ * 档位差异（与官方 compact / standard / detailed / verbose 一致）：
+ * - [CONCISE]  运行中也收起，标题只有「正在调用工具」等活动名，不带明细；
+ * - [STANDARD] 运行中也收起，标题带一行明细（工具名 / 命令 / 路径）；
+ * - [DETAILED] 运行中逐条实时展示，回答结束后再折叠成组；
+ * - [EXPANDED] 不分组，逐条展示。
  *
  * 持久化由 [com.catmoecircle.areyouok.gateway.GatewaySettings] 负责，
  * 存的是枚举 [name]（新增取值时旧版本会回退到 [STANDARD]）。
@@ -26,40 +27,46 @@ import com.catmoecircle.areyouok.R
 enum class WorkStepDisplay(
     @StringRes val labelRes: Int,
     @StringRes val descriptionRes: Int,
-    /** 折叠行是否露出摘要：思考开头一行 / 工具名。 */
-    val showsRowHint: Boolean,
-    /** 折叠行是否露出工具输出首行。 */
-    val showsOutputPreview: Boolean,
-    /** 完成后是否把工作步骤折叠成一条「工作步骤 · N 项」分组。 */
+    /** 是否把工作步骤收进「工作步骤」分组（「完全展开」为 false）。 */
     val groupsWorkSteps: Boolean,
+    /** 运行中也分组并以实时标题收起（「详细」运行中逐条展示）。 */
+    val groupsWhileRunning: Boolean,
+    /** 运行中的标题是否带一行明细（工具名 / 命令 / 路径）。 */
+    val showsLiveDetail: Boolean,
+    /** 展开分组后，组内折叠行是否露出工具名或思考首行。 */
+    val showsRowHint: Boolean,
 ) {
     CONCISE(
         labelRes = R.string.work_step_display_concise,
         descriptionRes = R.string.work_step_display_concise_desc,
-        showsRowHint = false,
-        showsOutputPreview = false,
         groupsWorkSteps = true,
+        groupsWhileRunning = true,
+        showsLiveDetail = false,
+        showsRowHint = false,
     ),
     STANDARD(
         labelRes = R.string.work_step_display_standard,
         descriptionRes = R.string.work_step_display_standard_desc,
-        showsRowHint = true,
-        showsOutputPreview = false,
         groupsWorkSteps = true,
+        groupsWhileRunning = true,
+        showsLiveDetail = true,
+        showsRowHint = true,
     ),
     DETAILED(
         labelRes = R.string.work_step_display_detailed,
         descriptionRes = R.string.work_step_display_detailed_desc,
-        showsRowHint = true,
-        showsOutputPreview = true,
         groupsWorkSteps = true,
+        groupsWhileRunning = false,
+        showsLiveDetail = true,
+        showsRowHint = true,
     ),
     EXPANDED(
         labelRes = R.string.work_step_display_expanded,
         descriptionRes = R.string.work_step_display_expanded_desc,
-        showsRowHint = true,
-        showsOutputPreview = true,
         groupsWorkSteps = false,
+        groupsWhileRunning = false,
+        showsLiveDetail = false,
+        showsRowHint = true,
     ),
     ;
 

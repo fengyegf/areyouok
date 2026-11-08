@@ -951,7 +951,7 @@ class GatewayRepositoryTest {
     }
 
     @Test
-    fun `background job notice arrives as system row and never as user message`() = runTest {
+    fun `background job notice stays out of the timeline like the desktop client`() = runTest {
         val transport = FakeTransport().apply {
             fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "T"))
         }
@@ -979,10 +979,8 @@ class GatewayRepositoryTest {
         )
         advanceUntilIdle()
 
-        val rows = repository.messages.value
-        assertEquals(1, rows.size)
-        assertEquals(ChatRole.SYSTEM, rows.single().role)
-        assertEquals("tool-jobs", rows.single().meta)
+        // 后台任务完成通知是上下文注入：不画成系统行，也不冒充用户消息。
+        assertEquals(0, repository.messages.value.size)
 
         // 真人消息（source.kind=user）仍然进用户气泡。
         transport.emitEvent(

@@ -28,13 +28,14 @@ internal fun List<Message>.toHistoryChatMessages(): List<ChatMessage> {
                     seq = message.seq,
                     time = message.time,
                     meta = message.text.takeIf { it.isNotBlank() },
+                    running = true,
                 )
             } else {
                 val callIndex = pendingCalls.removeFirstOrNull()
                 val call = callIndex?.let { out[it] }
                 if (call != null) {
                     // 原地替换成「调用 + 结果」一行：工具名留在 meta，输出进正文。
-                    out[callIndex] = call.copy(text = message.text)
+                    out[callIndex] = call.copy(text = message.text, running = false)
                 } else {
                     out += ChatMessage(
                         id = toolRowId(message, "result"),
@@ -83,7 +84,9 @@ internal fun Message.toTimelineMessages(): List<ChatMessage> {
             id = "$baseId-thinking",
             role = ChatRole.THINKING,
             text = reasoning,
-            seq = seq,
+            // 思考行是从同一条 assistant 消息拆出来的派生行：不能沿用消息的 seq，
+            // 否则分页按 seq 去重时会把紧随其后的正文行当成重复丢掉。
+            seq = null,
             time = time,
         )
     }

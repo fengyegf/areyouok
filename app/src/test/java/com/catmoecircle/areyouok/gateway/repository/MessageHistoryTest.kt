@@ -114,4 +114,21 @@ class MessageHistoryTest {
         assertEquals(ChatRole.ASSISTANT, rows[2].role)
         assertEquals("改好了", rows[2].text)
     }
+
+    @Test
+    fun `prepending a split assistant message keeps the reply text`() {
+        // 回归：思考行曾沿用消息 seq，分页按 seq 去重时把紧随其后的正文当成重复丢掉，
+        // 于是聊天里只剩工作步骤分组、看不到模型回答。
+        val history = listOf(
+            Message(seq = 2, role = "assistant", text = "改好了", reasoning = "先看代码"),
+        ).toHistoryChatMessages()
+
+        val assembler = MessageAssembler()
+        assembler.prepend(history)
+
+        val rows = assembler.snapshot()
+        assertEquals(2, rows.size)
+        assertTrue(rows.any { it.role == ChatRole.THINKING && it.text == "先看代码" })
+        assertTrue(rows.any { it.role == ChatRole.ASSISTANT && it.text == "改好了" })
+    }
 }

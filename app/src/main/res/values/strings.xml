@@ -109,14 +109,14 @@
 
     <!-- 聊天显示：工作步骤（工具调用）详细程度 -->
     <string name="settings_section_chat">聊天显示</string>
-    <string name="work_step_display_title">工作步骤显示</string>
+    <string name="work_step_display_title">工作步骤展示</string>
     <string name="work_step_display_desc">选择希望看到多少工具调用细节</string>
     <string name="work_step_display_concise">简洁</string>
-    <string name="work_step_display_concise_desc">思考与工具折叠成一行，只显示对话正文</string>
+    <string name="work_step_display_concise_desc">运行中也收起为一行标题，只显示活动名</string>
     <string name="work_step_display_standard">标准</string>
-    <string name="work_step_display_standard_desc">折叠时露出思考开头与工具名，点按展开</string>
+    <string name="work_step_display_standard_desc">运行中收起为一行标题，显示正在进行的操作</string>
     <string name="work_step_display_detailed">详细</string>
-    <string name="work_step_display_detailed_desc">折叠时露出工具名与输出首行，点按展开</string>
+    <string name="work_step_display_detailed_desc">运行中逐条实时显示，回答结束后折叠</string>
     <string name="work_step_display_expanded">完全展开</string>
     <string name="work_step_display_expanded_desc">工作步骤逐条显示，不折叠成一组；参数与输出点按展开</string>
     <string name="work_step_collapse_title">工作步骤收起时机</string>
@@ -139,6 +139,42 @@
     <string name="gateway_work_group_count">%1$d 项</string>
     <string name="gateway_work_group_done">已完成</string>
     <string name="gateway_work_group_running">进行中</string>
+
+    <!-- 工作步骤标题：运行中 / 结束后的活动文案（对齐桌面客户端） -->
+    <string name="work_step_live_thinking">正在分析请求</string>
+    <string name="work_step_live_read">正在读取文件</string>
+    <string name="work_step_live_read_image">正在读取图片</string>
+    <string name="work_step_live_search">正在搜索代码</string>
+    <string name="work_step_live_write">正在写入文件</string>
+    <string name="work_step_live_edit">正在编辑文件</string>
+    <string name="work_step_live_commands">正在运行命令</string>
+    <string name="work_step_live_code">正在运行代码</string>
+    <string name="work_step_live_web_search">正在搜索网页</string>
+    <string name="work_step_live_web_fetch">正在访问网页</string>
+    <string name="work_step_live_subagents">正在协调子智能体</string>
+    <string name="work_step_live_plan">正在更新计划</string>
+    <string name="work_step_live_questions">等待你的操作</string>
+    <string name="work_step_live_tools">正在调用工具</string>
+    <string name="work_step_done_thinking">已完成分析</string>
+    <string name="work_step_done_read">已读取文件</string>
+    <string name="work_step_done_read_image">已读取图片</string>
+    <string name="work_step_done_search">已搜索代码</string>
+    <string name="work_step_done_write">已写入文件</string>
+    <string name="work_step_done_edit">修改了文件</string>
+    <string name="work_step_done_commands">执行了命令</string>
+    <string name="work_step_done_code">运行了代码</string>
+    <string name="work_step_done_web_search">已搜索网页</string>
+    <string name="work_step_done_web_fetch">已访问网页</string>
+    <string name="work_step_done_subagents">已协调子智能体</string>
+    <string name="work_step_done_plan">更新了计划</string>
+    <string name="work_step_done_questions">向用户提出了问题</string>
+    <string name="work_step_done_tools">已调用工具</string>
+    <string name="work_step_done_join_two">%1$s并%2$s</string>
+    <string name="work_step_done_separator">，</string>
+    <string name="work_step_done_more">%1$s等</string>
+    <string name="work_step_done_shared_prefix">已</string>
+    <string name="work_step_live_detail_separator">" · "</string>
+
     <string name="gateway_history_loading">加载更早的消息…</string>
     <string name="gateway_history_load">加载更早的消息</string>
     <string name="chat_scroll_to_bottom">回到底部</string>

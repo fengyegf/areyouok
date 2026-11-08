@@ -66,25 +66,28 @@ class SettingsFormattingTest {
     }
 
     @Test
-    fun `work step display tiers expose increasing detail`() {
-        // 简洁：只露「思考过程 / 工具调用」标签，不露出任何摘要。
-        assertFalse(WorkStepDisplay.CONCISE.showsRowHint)
-        assertFalse(WorkStepDisplay.CONCISE.showsOutputPreview)
+    fun `work step display tiers follow the desktop client policies`() {
+        // 简洁：运行中也收起，标题只有活动名，不带明细。
         assertTrue(WorkStepDisplay.CONCISE.groupsWorkSteps)
+        assertTrue(WorkStepDisplay.CONCISE.groupsWhileRunning)
+        assertFalse(WorkStepDisplay.CONCISE.showsLiveDetail)
+        assertFalse(WorkStepDisplay.CONCISE.showsRowHint)
 
-        // 标准：在简洁基础上露出思考开头与工具名，仍折叠成工作步骤分组。
-        assertTrue(WorkStepDisplay.STANDARD.showsRowHint)
-        assertFalse(WorkStepDisplay.STANDARD.showsOutputPreview)
+        // 标准：运行中也收起，标题带一行明细（工具名 / 命令 / 路径）。
         assertTrue(WorkStepDisplay.STANDARD.groupsWorkSteps)
+        assertTrue(WorkStepDisplay.STANDARD.groupsWhileRunning)
+        assertTrue(WorkStepDisplay.STANDARD.showsLiveDetail)
+        assertTrue(WorkStepDisplay.STANDARD.showsRowHint)
 
-        // 详细：再露出工具输出首行（对齐上一版标准），仍折叠成工作步骤分组。
-        assertTrue(WorkStepDisplay.DETAILED.showsRowHint)
-        assertTrue(WorkStepDisplay.DETAILED.showsOutputPreview)
+        // 详细：运行中逐条实时展示，结束后再折叠。
         assertTrue(WorkStepDisplay.DETAILED.groupsWorkSteps)
+        assertFalse(WorkStepDisplay.DETAILED.groupsWhileRunning)
+        assertTrue(WorkStepDisplay.DETAILED.showsLiveDetail)
 
-        // 完全展开：工作步骤不再是单个分组，而是逐条展示；行内信息仍默认折叠。
-        assertTrue(WorkStepDisplay.EXPANDED.showsRowHint)
-        assertTrue(WorkStepDisplay.EXPANDED.showsOutputPreview)
+        // 完全展开：不分组，逐条展示；行内信息仍默认折叠。
         assertFalse(WorkStepDisplay.EXPANDED.groupsWorkSteps)
+        assertFalse(WorkStepDisplay.EXPANDED.groupsWhileRunning)
+        assertFalse(WorkStepDisplay.EXPANDED.showsLiveDetail)
+        assertTrue(WorkStepDisplay.EXPANDED.showsRowHint)
     }
 }

@@ -1,6 +1,11 @@
 package com.catmoecircle.areyouok.ui.gateway
 
+import androidx.annotation.StringRes
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -62,6 +67,9 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -96,19 +104,17 @@ private val ScrollToBottomClearance = 104.dp
  *
  * - user：右对齐气泡（纯文本，保留换行）；
  * - thinking：思考链折叠行（默认收起，流式时显示「思考中…」）；
- * - assistant：左对齐 Markdown 正文，流式时末尾带光标；
+ * - assistant：左对齐 Markdown 正文，始终作为普通消息展示；
  * - tool：按 [WorkStepDisplay] 渲染工作步骤折叠行；
- * - 一轮工作完成后（[running] 为 false）：工具/思考/中间说明折叠成一条
- *   「工作步骤 · N 项 · 已完成」分组，助手回复按「收起后显示的回复」保留在分组外；
- *   「完全展开」档不分组，工作步骤按普通消息逐条展示；
+ * - 工作步骤按「段」折叠：一轮里连续的思考 / 工具调用收成一个分组，助手回复把它截断。
+ *   运行中分组标题显示实时活动（「正在运行命令 · git status」），结束后显示完成摘要
+ *   （「已读取文件、执行了命令」）；分组默认收起，点按展开；
+ * - 「详细」档运行中逐条展示、结束后折叠，「完全展开」档不分组；
  * - system：系统通知（后台任务完成、子代理结算、团队消息等）折叠灰字行，
  *   点按展开——它永远不会画成用户自己的话；
  * - 顶部还有更早历史时（[hasOlder]）滚到顶自动加载上一页，并保持阅读位置。
  *
- * 前三档（简洁 / 标准 / 详细）共用两层折叠：先展开分组，再展开组内的思考 / 工具行，
- * 档位只决定折叠行的摘要露出多少；「完全展开」不折叠分组，但每行自身仍默认折叠
- * （见 [WorkStepDisplay]）。收起时机与保留哪些回复见 [WorkStepCollapseTiming] /
- * [WorkStepFoldedReplies]。
+ * 收起时机与保留哪些回复见 [WorkStepCollapseTiming] / [WorkStepFoldedReplies]。
  */
 @Composable
 fun MessageTimeline(
@@ -131,13 +137,22 @@ fun MessageTimeline(
     var followLatest by remember { mutableStateOf(true) }
 
     val groupWorkSteps = workStepDisplay.groupsWorkSteps
+    val groupWhileRunning = workStepDisplay.groupsWhileRunning
     val deferCollapse = workStepCollapseTiming == WorkStepCollapseTiming.NEXT_INPUT
     val keepAllReplies = workStepFoldedReplies == WorkStepFoldedReplies.ALL
-    val entries = remember(messages, running, groupWorkSteps, deferCollapse, keepAllReplies) {
+    val entries = remember(
+        messages,
+        running,
+        groupWorkSteps,
+        groupWhileRunning,
+        deferCollapse,
+        keepAllReplies,
+    ) {
         buildTimelineEntries(
             messages,
             running,
             groupWorkSteps = groupWorkSteps,
+            groupWhileRunning = groupWhileRunning,
             deferCollapse = deferCollapse,
             keepAllReplies = keepAllReplies,
         )
@@ -252,8 +267,11 @@ fun MessageTimeline(
                 }
             }
             items(count = entries.size, key = { index -> keys[index] }) { index ->
+                // 只有运行中会话的最后一条（正在进行的工具调用）才显示「调用中…」，
+                // 历史里未被结果配对的调用不会误显示成还在跑。
+                val liveTail = running && index == entries.lastIndex
                 when (val entry = entries[index]) {
-                    is TimelineEntry.Single -> MessageRow(entry.message, workStepDisplay)
+                    is TimelineEntry.Single -> MessageRow(entry.message, workStepDisplay, liveTail)
                     is TimelineEntry.WorkGroup -> WorkGroupCard(entry, workStepDisplay)
                 }
             }
@@ -432,12 +450,12 @@ private fun LazyListState.isAtBottom(margin: Int = 8): Boolean {
 // ------------------------------------------------------------------ 渲染
 
 @Composable
-private fun MessageRow(message: ChatMessage, workStepDisplay: WorkStepDisplay) {
+private fun MessageRow(message: ChatMessage, workStepDisplay: WorkStepDisplay, live: Boolean) {
     when (message.role) {
         ChatRole.USER -> UserBubble(message)
         ChatRole.ASSISTANT -> AssistantBubble(message)
         ChatRole.THINKING -> ThinkingRow(message, workStepDisplay)
-        ChatRole.TOOL -> ToolStepRow(message, workStepDisplay)
+        ChatRole.TOOL -> ToolStepRow(message, workStepDisplay, live)
         ChatRole.SYSTEM -> SystemLine(message)
     }
 }
@@ -512,16 +530,24 @@ private fun ThinkingRow(message: ChatMessage, level: WorkStepDisplay) {
     }
 }
 
-/** 工作步骤折叠组：工作结束后只留一条摘要，展开才看工具/思考/中间说明。 */
+/**
+ * 工作步骤折叠组：一行标题概括这一段工作，默认收起。
+ *
+ * 运行中标题是实时活动（「正在运行命令 · git status」），结束后是完成摘要
+ * （「已读取文件、执行了命令」）；点按展开组内每一行。
+ */
 @Composable
 private fun WorkGroupCard(group: TimelineEntry.WorkGroup, level: WorkStepDisplay) {
     val colorScheme = MaterialTheme.colorScheme
-    var expanded by rememberSaveable(group.key, key = "work#${group.key}") {
+    var expanded by rememberSaveable(
+        group.key,
+        level,
+        key = "work#${group.key}#${level.name}",
+    ) {
         mutableStateOf(false)
     }
-    val toolCount = group.items.count { it.role == ChatRole.TOOL }
-    val count = if (toolCount > 0) toolCount else group.items.size
-    val countText = stringResource(R.string.gateway_work_group_count, count)
+    val summary = remember(group.items, group.closed) { summarizeWork(group.items) }
+    val live = !group.closed
 
     Column(
         modifier = Modifier
@@ -543,23 +569,14 @@ private fun WorkGroupCard(group: TimelineEntry.WorkGroup, level: WorkStepDisplay
                 fontSize = 12.sp,
             )
             Spacer(Modifier.width(6.dp))
-            Text(
-                text = stringResource(R.string.gateway_work_group_title),
-                color = colorScheme.onSurface,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Medium,
-            )
-            Spacer(Modifier.width(6.dp))
-            Text(
-                text = "· $countText",
-                color = colorScheme.onSurfaceVariant,
-                fontSize = 12.sp,
-            )
-            Spacer(Modifier.weight(1f))
-            Text(
-                text = stringResource(R.string.gateway_work_group_done),
-                color = colorScheme.primary.copy(alpha = 0.85f),
-                fontSize = 11.sp,
+            if (live) {
+                LivePulse(Modifier.padding(end = 7.dp))
+            }
+            WorkGroupTitle(
+                live = live,
+                summary = summary,
+                level = level,
+                modifier = Modifier.weight(1f),
             )
         }
 
@@ -571,18 +588,152 @@ private fun WorkGroupCard(group: TimelineEntry.WorkGroup, level: WorkStepDisplay
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 group.items.forEach { item ->
-                    WorkItem(item, level)
+                    WorkItem(item, level, live)
                 }
             }
         }
     }
 }
 
+/** 分组标题：运行中显示带高光的实时活动，结束后显示完成摘要。 */
 @Composable
-private fun WorkItem(message: ChatMessage, level: WorkStepDisplay) {
+private fun WorkGroupTitle(
+    live: Boolean,
+    summary: WorkSummary,
+    level: WorkStepDisplay,
+    modifier: Modifier = Modifier,
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    if (!live) {
+        Text(
+            text = doneTitle(summary),
+            color = colorScheme.onSurface,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = modifier,
+        )
+        return
+    }
+
+    val alpha = rememberLivePulseAlpha()
+    val activity = summary.running ?: WorkActivity.THINKING
+    val label = stringResource(workStepLiveLabelRes(activity))
+    val detail = if (level.showsLiveDetail) summary.runningDetail else ""
+    val separator = stringResource(R.string.work_step_live_detail_separator)
+    val title = buildAnnotatedString {
+        withStyle(SpanStyle(color = colorScheme.onSurface.copy(alpha = alpha))) {
+            append(label)
+        }
+        if (detail.isNotBlank()) {
+            withStyle(SpanStyle(color = colorScheme.onSurfaceVariant.copy(alpha = alpha * 0.88f))) {
+                append(separator)
+                append(detail)
+            }
+        }
+    }
+    Text(
+        text = title,
+        color = colorScheme.onSurface,
+        fontSize = 13.sp,
+        fontWeight = FontWeight.Medium,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier,
+    )
+}
+
+/** 结束后的标题：按出现次数取前三类活动，拼成「已读取文件、执行了命令」。 */
+@Composable
+private fun doneTitle(summary: WorkSummary): String {
+    val activities = summary.titleActivities
+    if (activities.isEmpty()) return stringResource(R.string.work_step_done_thinking)
+    val labels = activities.map { stringResource(workStepDoneLabelRes(it)) }
+    val title = when (labels.size) {
+        1 -> labels[0]
+        2 -> {
+            val prefix = stringResource(R.string.work_step_done_shared_prefix)
+            val second = if (prefix.isNotEmpty() &&
+                labels[0].startsWith(prefix) &&
+                labels[1].startsWith(prefix)
+            ) {
+                labels[1].removePrefix(prefix)
+            } else {
+                labels[1]
+            }
+            stringResource(R.string.work_step_done_join_two, labels[0], second)
+        }
+        else -> labels.joinToString(stringResource(R.string.work_step_done_separator))
+    }
+    return if (summary.titleHasMore) stringResource(R.string.work_step_done_more, title) else title
+}
+
+/** 运行中的呼吸透明度：标题与圆点共用一个由亮到弱的循环。 */
+@Composable
+private fun rememberLivePulseAlpha(): Float {
+    val transition = rememberInfiniteTransition(label = "work-step-live")
+    val alpha by transition.animateFloat(
+        initialValue = 1f,
+        targetValue = 0.45f,
+        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        label = "work-step-live-alpha",
+    )
+    return alpha
+}
+
+@Composable
+private fun LivePulse(modifier: Modifier = Modifier) {
+    val alpha = rememberLivePulseAlpha()
+    Box(
+        modifier = modifier
+            .size(6.dp)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = alpha)),
+    )
+}
+
+@StringRes
+private fun workStepLiveLabelRes(activity: WorkActivity): Int = when (activity) {
+    WorkActivity.THINKING -> R.string.work_step_live_thinking
+    WorkActivity.READ -> R.string.work_step_live_read
+    WorkActivity.READ_IMAGE -> R.string.work_step_live_read_image
+    WorkActivity.SEARCH -> R.string.work_step_live_search
+    WorkActivity.WRITE -> R.string.work_step_live_write
+    WorkActivity.EDIT -> R.string.work_step_live_edit
+    WorkActivity.COMMANDS -> R.string.work_step_live_commands
+    WorkActivity.CODE -> R.string.work_step_live_code
+    WorkActivity.WEB_SEARCH -> R.string.work_step_live_web_search
+    WorkActivity.WEB_FETCH -> R.string.work_step_live_web_fetch
+    WorkActivity.SUBAGENTS -> R.string.work_step_live_subagents
+    WorkActivity.PLAN -> R.string.work_step_live_plan
+    WorkActivity.QUESTIONS -> R.string.work_step_live_questions
+    WorkActivity.TOOLS -> R.string.work_step_live_tools
+}
+
+@StringRes
+private fun workStepDoneLabelRes(activity: WorkActivity): Int = when (activity) {
+    WorkActivity.THINKING -> R.string.work_step_done_thinking
+    WorkActivity.READ -> R.string.work_step_done_read
+    WorkActivity.READ_IMAGE -> R.string.work_step_done_read_image
+    WorkActivity.SEARCH -> R.string.work_step_done_search
+    WorkActivity.WRITE -> R.string.work_step_done_write
+    WorkActivity.EDIT -> R.string.work_step_done_edit
+    WorkActivity.COMMANDS -> R.string.work_step_done_commands
+    WorkActivity.CODE -> R.string.work_step_done_code
+    WorkActivity.WEB_SEARCH -> R.string.work_step_done_web_search
+    WorkActivity.WEB_FETCH -> R.string.work_step_done_web_fetch
+    WorkActivity.SUBAGENTS -> R.string.work_step_done_subagents
+    WorkActivity.PLAN -> R.string.work_step_done_plan
+    WorkActivity.QUESTIONS -> R.string.work_step_done_questions
+    WorkActivity.TOOLS -> R.string.work_step_done_tools
+}
+
+@Composable
+private fun WorkItem(message: ChatMessage, level: WorkStepDisplay, live: Boolean) {
     when (message.role) {
         ChatRole.THINKING -> ThinkingRow(message, level)
-        ChatRole.TOOL -> ToolStepRow(message, level)
+        ChatRole.TOOL -> ToolStepRow(message, level, live)
         // 中间说明：工作过程里的 assistant 文字，弱化显示。
         else -> {
             SelectionContainer {
@@ -602,16 +753,16 @@ private fun WorkItem(message: ChatMessage, level: WorkStepDisplay) {
  * 工具调用折叠行。
  *
  * - 简洁：只露「工具调用」标签；
- * - 标准：露出工具名；
- * - 详细：工具名 + 输出首行（对齐上一版标准）；
- * - 完全展开：工作步骤不再收进分组，但工具行本身仍默认折叠，点按展开参数与输出。
+ * - 标准 / 详细：露出工具名；
+ * - 结果未回时标签后带「 · 调用中…」，与分组标题的实时活动一致；
+ * - 展开后显示参数与输出；是否收进分组由档位决定。
  */
 @Composable
-private fun ToolStepRow(message: ChatMessage, level: WorkStepDisplay) {
+private fun ToolStepRow(message: ChatMessage, level: WorkStepDisplay, live: Boolean) {
     val colorScheme = MaterialTheme.colorScheme
     val toolName = message.meta?.takeIf { it.isNotBlank() }
     val output = message.text.takeIf { it.isNotBlank() && it != message.meta }
-    // key 里带上档位：切换「工作步骤显示」后按新档位重新取默认展开态，
+    // key 里带上档位：切换「工作步骤展示」后按新档位重新取默认展开态，
     // 避免 LazyColumn 的 SaveableStateHolder 把上一档的展开状态张冠李戴。
     var expanded by rememberSaveable(
         message.id,
@@ -622,21 +773,18 @@ private fun ToolStepRow(message: ChatMessage, level: WorkStepDisplay) {
     }
 
     val label = if (level.showsRowHint) {
-        toolName ?: stringResource(R.string.gateway_tool_prefix)
+        toolName ?: stringResource(R.string.gateway_tool_call)
     } else {
         stringResource(R.string.gateway_tool_call)
-    }
-    val hint = if (level.showsOutputPreview) {
-        output?.lineSequence()?.firstOrNull { it.isNotBlank() }?.trim()?.takeIf { it.isNotEmpty() }
-    } else {
-        null
     }
 
     StepRow(
         shape = ToolCardShape,
         label = label,
         labelColor = colorScheme.onSurface,
-        hint = hint,
+        hint = null,
+        streaming = live && message.running,
+        streamingText = stringResource(R.string.gateway_tool_running),
         expanded = expanded,
         onToggle = { expanded = !expanded },
     ) {
