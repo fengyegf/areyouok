@@ -1,13 +1,16 @@
 /**
- * The two HTTP(S) listeners of the gateway plus the whole `/v1` REST surface
- * and the loopback `/admin` page/API.
+ * The two HTTP(S) listeners of the gateway, the whole `/v1` REST surface, and
+ * the management API behind the in-app configuration page.
  *
  *   - LAN edge: `config.httpPort` (0 = disabled), plain HTTP, private sources
  *     only (the `/v1/pair` route is the only pre-auth endpoint),
  *   - public edge: `config.httpsPort` (0 = disabled), TLS with the self-signed
  *     material from `tls.js`, every route requires a device Bearer token
  *     except `/v1/pair`,
- *   - `/admin*`: loopback only, rendered by `admin.js`.
+ *   - the management API is **not** served here: there is no standalone admin
+ *     page any more. `index.js` mounts those JSON routes on the DSH host web
+ *     server (`mountPanel`), so the Web UI calls them from its own origin and
+ *     the browser half can render the panel inside the Plugins page.
  *
  * The DSH side is reached exclusively through the injected `dsh` client
  * (`POST /api/<method>` + follow streams); this file never touches DSH
@@ -32,19 +35,19 @@ import {
   writeJson,
 } from './util.js'
 import {
+  buildPairingView,
+  buildState,
   enumerateAddresses,
   formatHost,
   pairingUri,
-  renderAdminPage,
-  renderAdminState,
-  renderPairingView,
-} from './admin.js'
+} from './panel.js'
+import { formatFingerprint } from './tls.js'
 
 /** DSH version this plugin was verified against. */
 export const DSH_VERSION = '0.2.2-rc.1'
 
 /** Gateway package version (kept in sync with package.json by hand). */
-export const GATEWAY_VERSION = '0.1.0'
+export const GATEWAY_VERSION = '0.2.0'
 
 /** `/v1` protocol version. */
 export const PROTOCOL_VERSION = 1
@@ -87,26 +90,15 @@ const ROUTES = [
   ['GET', /^\/v1\/interventions$/, 'interventions'],
   ['POST', /^\/v1\/interventions\/([^/]+)\/answer$/, 'interventionAnswer'],
   ['GET', /^\/v1\/events$/, 'events'],
-  ['GET', /^\/admin\/?$/, 'adminPage'],
-  ['GET', /^\/admin\/api\/state$/, 'adminState'],
-  ['GET', /^\/admin\/api\/pairing$/, 'adminPairingCurrent'],
-  ['POST', /^\/admin\/api\/pairing$/, 'adminPairingCreate'],
-  ['GET', /^\/admin\/api\/devices$/, 'adminDevices'],
-  ['DELETE', /^\/admin\/api\/devices\/([^/]+)$/, 'adminDeviceRevoke'],
-  ['PATCH', /^\/admin\/api\/config$/, 'adminConfigPatch'],
 ]
 
-/** Content security policy for the admin page (inline CSS/JS only). */
-const ADMIN_CSP = [
-  "default-src 'none'",
-  "style-src 'unsafe-inline'",
-  "script-src 'unsafe-inline'",
-  "img-src data:",
-  "connect-src 'self'",
-  "base-uri 'none'",
-  "form-action 'none'",
-  "frame-ancestors 'none'",
-].join('; ')
+/** Strip characters a display name should never carry into the panel. */
+function cleanName(value, fallback = '') {
+  if (typeof value !== 'string') return fallback
+  // eslint-disable-next-line no-control-regex
+  const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, '').trim()
+  return cleaned === '' ? fallback : cleaned.slice(0, 64)
+}
 
 /** Parse an integer query parameter, or `fallback` when absent/invalid. */
 function intParam(value, fallback = null, min = -Infinity, max = Infinity) {
@@ -359,7 +351,6 @@ export class ApiServer {
     this.closed = false
     this.startedAt = Date.now()
     this.lastError = ''
-    this.restartRequired = false
     /**
      * Raw TCP sockets that were upgraded to WebSocket.
      *
@@ -369,7 +360,7 @@ export class ApiServer {
      * own set so {@link close} can terminate them immediately.
      */
     this.upgradedSockets = new Set()
-    /** Runtime-only config overrides written by the admin page. */
+    /** Runtime-only config overrides written by the in-app panel. */
     this.overrides = { lanRequirePairing: null, mdns: null }
     /** Optional mDNS advertiser injected by index.js for status reporting. */
     this.mdns = null
@@ -380,7 +371,7 @@ export class ApiServer {
     return [this.lanServer, this.publicServer]
   }
 
-  /** Effective config (config file + admin overrides). */
+  /** Effective config (config file + panel overrides). */
   effectiveConfig() {
     const config = { ...this.config }
     if (this.overrides.lanRequirePairing !== null) config.lanRequirePairing = this.overrides.lanRequirePairing
@@ -733,35 +724,6 @@ export class ApiServer {
 
   #fingerprint() {
     return typeof this.tls?.fingerprint === 'string' ? this.tls.fingerprint : ''
-  }
-
-  /** Build the admin state payload (loopback only). */
-  async #adminState() {
-    const config = this.effectiveConfig()
-    const publicUrls = this.#publicUrls()
-    const lanUrls = this.#lanUrls()
-    return renderAdminState({
-      name: config.name ?? 'dsh-gateway',
-      version: GATEWAY_VERSION,
-      fingerprint: this.#fingerprint(),
-      ports: { lan: this.lanPort, public: this.publicPort },
-      mdns: {
-        enabled: Boolean(config.mdns),
-        active: Boolean(config.mdns) && this.lanPort > 0 && (this.mdns === null || this.mdns?.advertising !== false),
-      },
-      dsh: {
-        connected: Boolean(this.dsh?.connected),
-        clientId: typeof this.dsh?.eventsClientId === 'string' ? this.dsh.eventsClientId : null,
-      },
-      devices: this.auth?.devices?.() ?? [],
-      pairing: this.auth?.currentPairing?.() ?? null,
-      config,
-      publicUrls,
-      lanUrls,
-      uptimeMs: Date.now() - this.startedAt,
-      restartRequired: this.restartRequired,
-      lastError: this.lastError,
-    })
   }
 
   // -------------------------------------------------------------- /v1 routes
@@ -1151,77 +1113,86 @@ export class ApiServer {
     }
   }
 
-  // ----------------------------------------------------------- /admin routes
-
-  async hAdminPage({ res }) {
-    const state = await this.#adminState()
-    const html = renderAdminPage({
-      state,
-      name: state.name,
-      fingerprint: state.fingerprint,
-      config: state.config,
-      publicUrls: state.publicUrls,
+  /** Build the panel snapshot consumed by the in-app configuration page. */
+  async panelState() {
+    const config = this.effectiveConfig()
+    const publicUrls = this.#publicUrls()
+    const lanUrls = this.#lanUrls()
+    const fingerprint = this.#fingerprint()
+    return buildState({
+      name: config.name ?? 'dsh-gateway',
+      version: GATEWAY_VERSION,
+      fingerprint,
+      fingerprintPretty: formatFingerprint(fingerprint),
+      ports: { lan: this.lanPort, public: this.publicPort },
+      mdns: {
+        enabled: Boolean(config.mdns),
+        active: Boolean(config.mdns) && this.lanPort > 0 && (this.mdns === null || this.mdns?.advertising !== false),
+      },
+      dsh: {
+        connected: Boolean(this.dsh?.connected),
+        clientId: typeof this.dsh?.eventsClientId === 'string' ? this.dsh.eventsClientId : null,
+      },
+      devices: this.auth?.devices?.() ?? [],
+      pairing: this.auth?.currentPairing?.() ?? null,
+      config,
+      publicUrls,
+      lanUrls,
+      uptimeMs: Date.now() - this.startedAt,
+      lastError: this.lastError,
     })
-    if (res.headersSent || res.destroyed) return
-    res.writeHead(200, {
-      'content-type': 'text/html; charset=utf-8',
-      'cache-control': 'no-store',
-      'content-security-policy': ADMIN_CSP,
-      'x-content-type-options': 'nosniff',
-      'x-frame-options': 'DENY',
-      'referrer-policy': 'no-referrer',
-    })
-    res.end(html)
   }
 
-  async hAdminState({ res }) {
-    writeJson(res, 200, await this.#adminState())
-  }
-
-  async hAdminPairingCurrent({ res }) {
+  /** The current pairing code (panel only), rendered for the QR view. */
+  async panelPairing() {
     const pairing = this.auth?.currentPairing?.() ?? null
     const view = pairing === null
       ? null
-      : await renderPairingView({ pairing, fingerprint: this.#fingerprint(), name: this.effectiveConfig().name })
-    writeJson(res, 200, { ok: true, pairing: view })
+      : await buildPairingView({ pairing, fingerprint: this.#fingerprint(), name: this.effectiveConfig().name })
+    return view
   }
 
-  async hAdminPairingCreate({ res }) {
+  /** Mint a fresh one-shot pairing code (panel only). */
+  async panelPairingCreate() {
     if (this.auth === null || typeof this.auth?.createPairingCode !== 'function') {
       throw new HttpError(503, 'dsh_unavailable', 'pairing is unavailable')
     }
     const urls = this.#pairingUrls()
     const fingerprint = this.#fingerprint()
     const pairing = this.auth.createPairingCode(urls, { fingerprint })
-    const view = await renderPairingView({ pairing, fingerprint, name: this.effectiveConfig().name })
+    const view = await buildPairingView({ pairing, fingerprint, name: this.effectiveConfig().name })
     this.logger.info?.(`pairing code created (ttl=${Math.round((pairing.expiresAt - Date.now()) / 1000)}s, urls=${urls.length})`)
-    writeJson(res, 200, { ok: true, pairing: view })
+    return view
   }
 
-  hAdminDevices({ res }) {
-    const devices = this.auth?.devices?.() ?? []
-    writeJson(res, 200, { ok: true, devices })
+  /** Revoke one paired device (panel only). */
+  panelRevokeDevice(deviceId) {
+    return this.auth?.revoke?.(deviceId) ?? false
   }
 
-  hAdminDeviceRevoke({ res, params }) {
-    const deviceId = decodeSegment(params[0])
-    const revoked = this.auth?.revoke?.(deviceId) ?? false
-    writeJson(res, 200, { ok: true, revoked })
-  }
-
-  async hAdminConfigPatch({ req, res }) {
-    const body = await readJsonBody(req, 64 * 1024)
+  /**
+   * Apply an in-memory config change from the panel.
+   *
+   * Both switches are runtime overrides: they survive until the plugin fiber is
+   * disposed, and the panel reports that a DSH restart is needed to make them
+   * the persisted configuration.
+   * @param {Record<string, unknown>} body - `{key,value}` or a partial config object.
+   * @returns {{applied:Record<string, boolean>, restartRequired: boolean}}
+   */
+  panelConfigPatch(body) {
+    const input = body !== null && typeof body === 'object' ? body : {}
     const patch = {}
-    if (typeof body.key === 'string' && 'value' in body) {
-      patch[body.key] = body.value
+    if (typeof input.key === 'string' && 'value' in input) {
+      patch[input.key] = input.value
     } else {
-      if ('lanRequirePairing' in body) patch.lanRequirePairing = body.lanRequirePairing
-      if ('mdns' in body) patch.mdns = body.mdns
+      if ('lanRequirePairing' in input) patch.lanRequirePairing = input.lanRequirePairing
+      if ('mdns' in input) patch.mdns = input.mdns
     }
     const unknown = Object.keys(patch).filter((key) => key !== 'lanRequirePairing' && key !== 'mdns')
     if (unknown.length > 0) throw new HttpError(400, 'invalid_request', `unsupported config key: ${unknown[0]}`)
     if (Object.keys(patch).length === 0) throw new HttpError(400, 'invalid_request', 'nothing to patch')
     const applied = {}
+    let restartRequired = false
     if ('lanRequirePairing' in patch) {
       const value = Boolean(patch.lanRequirePairing)
       this.overrides.lanRequirePairing = value
@@ -1233,19 +1204,15 @@ export class ApiServer {
       this.overrides.mdns = value
       applied.mdns = value
       // The advertiser is owned by the plugin fiber; only a restart re-reads it.
-      this.restartRequired = true
+      restartRequired = true
     }
-    this.logger.info?.(`admin config patched in memory: ${Object.keys(applied).join(',')}`)
-    writeJson(res, 200, {
-      ok: true,
-      applied,
-      restartRequired: this.restartRequired,
-    })
+    this.logger.info?.(`panel config patched in memory: ${Object.keys(applied).join(',')}`)
+    return { applied, restartRequired }
   }
 }
 
 /** Build the `dshgw://pair` URI for a pairing entry (used by tests/scripts). */
-export function adminPairingUri(input) {
+export function gatewayPairingUri(input) {
   return pairingUri(input)
 }
 

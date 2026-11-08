@@ -1,27 +1,39 @@
 {
   "name": "dsh-gateway",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "DSH 局域网/公网转发网关插件：把本机 DSH 的会话、消息、审批能力以稳定的 /v1 协议暴露给局域网/公网设备（APK 客户端），自带 mDNS 发现、扫码配对、设备令牌与审批补发。",
+  "description": "DSH 局域网/公网转发网关插件：把本机 DSH 的会话、消息、审批能力以稳定的 /v1 协议暴露给局域网/公网设备（APK 客户端），自带 mDNS 发现、扫码配对、设备令牌与审批补发；管理界面内置在「插件 → 已安装插件」的配置页里。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": {
       "default": "./lib/index.js"
     },
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
+    "locale",
     "cordis.patch.yml",
     "README.md"
   ],
+  "icon": "icon.svg",
   "engines": {
     "node": ">=20"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
     },
     "compatibility": {
       "dsh": ">=0.2.2-rc.1 <0.3.0-0"

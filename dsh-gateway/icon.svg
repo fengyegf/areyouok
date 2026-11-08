@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="DSH Gateway">
+  <rect x="1" y="1" width="30" height="30" rx="8" fill="#0f766e"/>
+  <rect x="9" y="4.5" width="14" height="23" rx="3.5" fill="#ffffff" opacity="0.96"/>
+  <rect x="11.5" y="8" width="9" height="8" rx="1.6" fill="#0f766e"/>
+  <rect x="12.6" y="9.1" width="2" height="2" fill="#ffffff"/>
+  <rect x="16.2" y="9.1" width="2" height="2" fill="#ffffff"/>
+  <rect x="16.2" y="12.4" width="2" height="2" fill="#ffffff"/>
+  <rect x="12.6" y="12.4" width="2" height="2" fill="#ffffff" opacity="0.55"/>
+  <rect x="12.5" y="19" width="9" height="1.9" rx="0.95" fill="#0f766e" opacity="0.85"/>
+  <rect x="12.5" y="22.2" width="5.5" height="1.9" rx="0.95" fill="#0f766e" opacity="0.5"/>
+</svg>

@@ -1,14 +1,20 @@
 /**
  * dsh-gateway plugin entry.
  *
- * Wires the four moving parts together:
+ * Wires the moving parts together:
  *   - {@link DshLoopbackClient}: talks to this process' own DSH over loopback
  *     HTTP + `/api/remote.mux` (cookie minted from the in-process launch token),
  *   - {@link EventHub}: normalizes DSH frames into `/v1` events, keeps seq /
  *     ring / pending interventions / device table and persists them,
  *   - {@link AuthService} + {@link ApiServer} + {@link StreamServer}: the LAN
- *     HTTP (`:7788`) and public HTTPS (`:7789`) edges plus `/admin`,
+ *     HTTP (`:7788`) and public HTTPS (`:7789`) edges,
+ *   - {@link mountPanel}: the management API the in-app configuration page
+ *     calls, registered on the DSH host web server,
  *   - {@link MdnsAdvertiser}: zero-config discovery for the APK.
+ *
+ * There is no administrative web page: pairing, the device list and the two
+ * runtime switches live in the Web UI, in the plugin's own configuration page
+ * (`lib/client.js`), so they inherit the host's theme, locale and login.
  *
  * Everything is defensive: this code runs inside the DSH process, so a failure
  * here must degrade the gateway, never the host.
@@ -27,6 +33,7 @@ import { ApiServer } from './http.js'
 import { StreamServer } from './ws.js'
 import { MdnsAdvertiser } from './mdns.js'
 import { ensureTlsMaterial } from './tls.js'
+import { mountPanel } from './panel-routes.js'
 import {
   normalizeWaterfall,
   normalizeSessionRecord,
@@ -67,9 +74,32 @@ export function createGateway(options) {
   let mdns = null
   /** @type {DshLoopbackClient|null} */
   let dsh = null
+  /** @type {(() => void)|null} */
+  let unmountPanel = null
   let disposed = false
   let started = null
   let ports = { lanPort: 0, publicPort: 0 }
+
+  /**
+   * Publish the panel's JSON routes on the DSH host web server.
+   *
+   * Failure is contained: a profile whose host has no `webServer.register`
+   * (a bare test context, or a host without the Web carrier) keeps the gateway
+   * data plane, and only the in-app page loses its backend.
+   */
+  function mountPanelRoutes() {
+    if (unmountPanel !== null) return
+    if (typeof ctx?.webServer?.register !== 'function') {
+      logger.debug?.('host web server unavailable; the in-app plugin page has no backend')
+      return
+    }
+    try {
+      unmountPanel = mountPanel({ ctx, api: () => api, logger })
+    } catch (error) {
+      logger.warn(`in-app plugin panel did not mount: ${error?.message ?? error}`)
+      unmountPanel = null
+    }
+  }
 
   /** Route one `$events` frame into hub state. */
   function handleEventsFrame(frame) {
@@ -227,6 +257,7 @@ export function createGateway(options) {
       }
 
       logger.info(`listening lan=${ports.lanPort} public=${ports.publicPort} mdns=${config.mdns}`)
+      mountPanelRoutes()
       try {
         await dsh.start()
       } catch (error) {
@@ -241,6 +272,12 @@ export function createGateway(options) {
   async function stop() {
     if (disposed) return
     disposed = true
+    try {
+      unmountPanel?.()
+    } catch {
+      // ignore
+    }
+    unmountPanel = null
     try {
       await mdns?.stop()
     } catch {
@@ -277,6 +314,8 @@ export function createGateway(options) {
     get mdns() { return mdns },
     get ports() { return ports },
     get disposed() { return disposed },
+    /** Mount the host-side panel routes now (idempotent; `start` calls it too). */
+    mountPanel: mountPanelRoutes,
   }
 }
 

@@ -33,7 +33,7 @@ export const TEST_DIR = fileURLToPath(new URL('.', import.meta.url))
 export const DEFAULT_TIMEOUT_MS = 8_000
 
 /** Module loaders that may be missing while plugin-core / plugin-edge work. */
-const LIB_MODULES = ['index.js', 'util.js', 'config.js', 'hub.js', 'normalize.js', 'dsh.js', 'http.js', 'ws.js', 'auth.js', 'tls.js', 'mdns.js', 'admin.js']
+const LIB_MODULES = ['index.js', 'util.js', 'config.js', 'hub.js', 'normalize.js', 'dsh.js', 'http.js', 'ws.js', 'auth.js', 'tls.js', 'mdns.js', 'panel.js', 'panel-routes.js']
 
 /**
  * Wait for one condition, polling on a short interval.
@@ -120,6 +120,14 @@ export function makeCtx(options) {
   const port = options.port
   const origin = options.origin ?? `http://${host}:${port}`
   const launchToken = options.launchToken ?? ''
+  /**
+   * Host-web-server route table the plugin mounts on (`mountPanel`).
+   *
+   * Recording instead of throwing lets a test drive the exact handlers the
+   * Host would dispatch, without standing up a second HTTP server.
+   * @type {Map<string, {handler:Function}>}
+   */
+  const routes = new Map()
   const webServer = {
     get port() {
       return port
@@ -130,8 +138,10 @@ export function makeCtx(options) {
     getOrigin() {
       return origin
     },
-    register() {
-      throw new Error('mock ctx: ctx.webServer.register is not implemented')
+    register(route) {
+      if (routes.has(route.path)) throw new Error(`mock ctx: duplicate route ${route.path}`)
+      routes.set(route.path, route)
+      return () => routes.delete(route.path)
     },
     registerUpgrade() {
       throw new Error('mock ctx: ctx.webServer.registerUpgrade is not implemented')
@@ -143,10 +153,14 @@ export function makeCtx(options) {
       url.searchParams.set('token', launchToken)
       return url.href
     },
+    requestRejection() {
+      return undefined
+    },
   }
   return {
     webServer,
     connection,
+    routes,
     logger: options.logger,
     effect: (factory) => {
       const dispose = typeof factory === 'function' ? factory() : undefined
@@ -155,7 +169,8 @@ export function makeCtx(options) {
     on() {
       return () => {}
     },
-    get() {
+    get(name) {
+      if (name === 'connection') return connection
       return undefined
     },
     emit() {},

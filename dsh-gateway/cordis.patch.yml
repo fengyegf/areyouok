@@ -1,6 +1,13 @@
 # dsh-gateway bundle patch: one host row over the Web or Desktop profile.
+#
 # The row name resolves from the profile's own node_modules where
 # `dsh plugin --profile <profile> add link:<path>` installed this package.
+#
+# The same row also carries the browser half (`lib/client.js`, declared under
+# `dsh.client` in package.json): mounting the row publishes the client bundle,
+# which registers the gateway's configuration page into the Plugins page. There
+# is no separate admin entry point any more — pairing, the device list and the
+# two runtime switches are configured from 「插件 → 已安装插件 → DSH 网关」.
 - insert:
     - id: dsh-gateway
       name: dsh-gateway
