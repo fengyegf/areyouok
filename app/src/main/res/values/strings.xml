@@ -141,6 +141,7 @@
     <string name="gateway_work_group_running">进行中</string>
     <string name="gateway_history_loading">加载更早的消息…</string>
     <string name="gateway_history_load">加载更早的消息</string>
+    <string name="chat_scroll_to_bottom">回到底部</string>
 
     <!-- Markdown 渲染 -->
     <string name="markdown_code_copy">复制代码</string>

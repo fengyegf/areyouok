@@ -167,7 +167,7 @@ private fun SettingsDeviceRow(
         Icon(
             imageVector = MiuixIcons.Regular.ScreenMirroring,
             contentDescription = null,
-            tint = if (active) colorScheme.onSurface else colorScheme.onSurfaceVariant,
+            tint = if (active) colorScheme.primary else colorScheme.onSurfaceVariant,
             modifier = Modifier.size(22.dp),
         )
         Spacer(Modifier.width(14.dp))
@@ -424,7 +424,6 @@ internal fun SettingsNotificationPage(
             text = stringResource(R.string.settings_notifications_permission_hint),
             color = colorScheme.onSurfaceVariant,
             fontSize = 11.sp,
-            modifier = Modifier.padding(start = 6.dp, end = 6.dp),
         )
 
         Spacer(Modifier.height(18.dp))

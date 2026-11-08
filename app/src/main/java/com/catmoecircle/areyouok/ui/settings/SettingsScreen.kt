@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsBottomHeight
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.DropdownMenu
@@ -52,6 +53,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -64,6 +66,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.catmoecircle.areyouok.R
@@ -190,6 +193,7 @@ fun SettingsScreen(
         SettingsTopBar(
             title = stringResource(page.titleRes),
             busy = busy,
+            showTitle = page != SettingsPage.ROOT,
             onBack = {
                 if (busy) return@SettingsTopBar
                 if (page == SettingsPage.ROOT) onBack() else page = SettingsPage.ROOT
@@ -274,69 +278,118 @@ fun SettingsScreen(
     }
 }
 
-/** 顶部返回栏：返回按钮 + 居中的页面标题（分类入口显示「设置」，子页显示分类名）。 */
+/**
+ * 顶部返回栏与应用里的圆形悬浮按钮保持一致；根页面由内容区展示标题，
+ * 子页在返回按钮右侧显示左对齐的紧凑标题。
+ */
 @Composable
-private fun SettingsTopBar(title: String, busy: Boolean, onBack: () -> Unit) {
+private fun SettingsTopBar(
+    title: String,
+    busy: Boolean,
+    showTitle: Boolean,
+    onBack: () -> Unit,
+) {
     val colorScheme = MaterialTheme.colorScheme
-    Row(
+    Box(
         modifier = Modifier
             .fillMaxWidth()
             .windowInsetsPadding(WindowInsets.statusBars)
-            .padding(horizontal = 4.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        contentAlignment = Alignment.Center,
     ) {
-        IconButton(
-            onClick = onBack,
-            enabled = !busy,
-            modifier = Modifier.size(48.dp),
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 680.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(
-                imageVector = MiuixIcons.Regular.Back,
-                contentDescription = stringResource(R.string.settings_back),
-                tint = if (busy) {
-                    colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                } else {
-                    colorScheme.onSurface
-                },
-                modifier = Modifier.size(22.dp),
-            )
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .shadow(
+                        elevation = 8.dp,
+                        shape = CircleShape,
+                        clip = false,
+                        ambientColor = Color.Black.copy(alpha = 0.10f),
+                        spotColor = Color.Black.copy(alpha = 0.14f),
+                    )
+                    .clip(CircleShape)
+                    .background(colorScheme.surface)
+                    .border(
+                        width = 1.dp,
+                        color = colorScheme.outline.copy(alpha = 0.28f),
+                        shape = CircleShape,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                IconButton(
+                    onClick = onBack,
+                    enabled = !busy,
+                    modifier = Modifier.size(44.dp),
+                ) {
+                    Icon(
+                        imageVector = MiuixIcons.Regular.Back,
+                        contentDescription = stringResource(R.string.settings_back),
+                        tint = if (busy) {
+                            colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                        } else {
+                            colorScheme.onSurface
+                        },
+                        modifier = Modifier.size(21.dp),
+                    )
+                }
+            }
+
+            if (showTitle) {
+                Text(
+                    text = title,
+                    color = colorScheme.onSurface,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Start,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(start = 12.dp),
+                )
+            } else {
+                Spacer(Modifier.weight(1f))
+            }
+
+            Spacer(Modifier.size(44.dp))
         }
-
-        Text(
-            text = title,
-            color = colorScheme.onSurface,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.SemiBold,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.weight(1f),
-        )
-
-        // 与左侧返回按钮等宽，保证标题在屏幕上居中。
-        Spacer(Modifier.size(48.dp))
     }
 }
 
-/** 设置页通用滚动容器：水平留白 + IME / 底部导航栏避让。 */
+/** 设置页通用滚动容器：统一最大宽度、水平留白与底部安全区。 */
 @Composable
 internal fun SettingsPageScaffold(
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    Column(
+    Box(
         modifier = modifier
             .fillMaxSize()
             .imePadding()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp),
+            .verticalScroll(rememberScrollState()),
+        contentAlignment = Alignment.TopCenter,
     ) {
-        Spacer(Modifier.height(6.dp))
-        content()
-        Spacer(Modifier.height(24.dp))
-        Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.navigationBars))
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 680.dp)
+                .padding(horizontal = 16.dp),
+        ) {
+            Spacer(Modifier.height(2.dp))
+            content()
+            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.navigationBars))
+        }
     }
 }
 
-/** 设置分组：可选小标题 + 圆角卡片容器。 */
+/** 设置分组：与应用里的连接卡片共用半透明表面和描边。 */
 @Composable
 internal fun SettingsGroup(
     title: String? = null,
@@ -345,7 +398,7 @@ internal fun SettingsGroup(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val colorScheme = MaterialTheme.colorScheme
-    val shape = RoundedCornerShape(20.dp)
+    val shape = RoundedCornerShape(18.dp)
 
     Column(modifier = modifier.fillMaxWidth()) {
         if (!title.isNullOrBlank()) {
@@ -354,7 +407,7 @@ internal fun SettingsGroup(
                 color = colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
-                modifier = Modifier.padding(start = 6.dp, bottom = 8.dp),
+                modifier = Modifier.padding(start = 8.dp, bottom = 8.dp),
             )
         }
 
@@ -363,25 +416,29 @@ internal fun SettingsGroup(
                 .fillMaxWidth()
                 .clip(shape)
                 .background(colorScheme.surfaceVariant.copy(alpha = 0.45f))
-                .border(1.dp, colorScheme.outline.copy(alpha = 0.18f), shape)
+                .border(
+                    width = 1.dp,
+                    color = colorScheme.outline.copy(alpha = 0.18f),
+                    shape = shape,
+                )
                 .padding(contentPadding),
             content = content,
         )
     }
 }
 
-/** 分组内的分隔线；默认从图标列右侧开始，和 iOS 设置风格一致。 */
+/** 分组内的分隔线；默认从图标列右侧开始。 */
 @Composable
-internal fun SettingsDivider(startInset: androidx.compose.ui.unit.Dp = 52.dp) {
+internal fun SettingsDivider(startInset: Dp = 52.dp) {
     HorizontalDivider(
         modifier = Modifier.padding(start = startInset, end = 16.dp),
         thickness = 0.5.dp,
-        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
+        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f),
     )
 }
 
 /**
- * 可点击的导航行：左侧图标，中间标题/说明，右侧值 + 箭头。
+ * 可点击的导航行：裸图标 + 标题/说明 + 右侧值 + 箭头。
  *
  * 分类入口（根页面）用 [value] 展示当前连接/版本等摘要；子页里的入口行只用标题。
  */
@@ -409,13 +466,17 @@ internal fun SettingsNavRow(
         modifier = modifier
             .fillMaxWidth()
             .then(clickModifier)
-            .padding(horizontal = 16.dp, vertical = 13.dp),
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
             imageVector = icon,
             contentDescription = null,
-            tint = contentColor,
+            tint = if (enabled) {
+                colorScheme.onSurfaceVariant
+            } else {
+                colorScheme.onSurfaceVariant.copy(alpha = 0.42f)
+            },
             modifier = Modifier.size(22.dp),
         )
         Spacer(Modifier.width(14.dp))
@@ -477,7 +538,7 @@ internal fun SettingsSwitchRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 11.dp),
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
@@ -671,6 +732,15 @@ private fun SettingsRootPage(
     }
 
     SettingsPageScaffold {
+        Text(
+            text = stringResource(R.string.settings_title),
+            color = colorScheme.onSurface,
+            fontSize = 24.sp,
+            fontWeight = FontWeight.SemiBold,
+            lineHeight = 30.sp,
+            modifier = Modifier.padding(start = 8.dp, top = 2.dp, bottom = 18.dp),
+        )
+
         SettingsGroup(title = stringResource(R.string.settings_section_connection)) {
             SettingsNavRow(
                 icon = MiuixIcons.Regular.Link,

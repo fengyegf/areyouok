@@ -1,5 +1,11 @@
 package com.catmoecircle.areyouok.ui.gateway
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -25,6 +32,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -33,18 +41,25 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -57,8 +72,12 @@ import com.catmoecircle.areyouok.ui.gateway.markdown.MarkdownText
 import com.catmoecircle.areyouok.ui.settings.WorkStepCollapseTiming
 import com.catmoecircle.areyouok.ui.settings.WorkStepDisplay
 import com.catmoecircle.areyouok.ui.settings.WorkStepFoldedReplies
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.ChevronForward
 
 private val UserBubbleShape = RoundedCornerShape(18.dp, 18.dp, 6.dp, 18.dp)
 private val ToolCardShape = RoundedCornerShape(10.dp)
@@ -68,6 +87,9 @@ private val prettyJson = Json { prettyPrint = true }
 
 /** 列表底部为输入区留出的空间（磨砂栏 + 展开态操作行 + 手势条）。 */
 private val ComposerClearance = 168.dp
+
+/** 「回到底部」按钮与输入区之间的留白。 */
+private val ScrollToBottomClearance = 104.dp
 
 /**
  * 会话消息时间线。
@@ -101,11 +123,12 @@ fun MessageTimeline(
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     val imeInsets = WindowInsets.ime
-    // 键盘弹起时输入区整体上移，列表底部也要让出同样的高度，
-    // 否则最新消息会留在输入框/键盘后面看不见。
-    val imeBottom = with(density) { imeInsets.getBottom(density).toDp() }
+    // 用户是否仍在跟随最新消息。键盘改变视口高度时不改动这个值，
+    // 避免布局收缩后的瞬时“不在底部”把原本贴底的阅读位置误判成用户上滑。
+    var followLatest by remember { mutableStateOf(true) }
 
     val groupWorkSteps = workStepDisplay.groupsWorkSteps
     val deferCollapse = workStepCollapseTiming == WorkStepCollapseTiming.NEXT_INPUT
@@ -140,16 +163,13 @@ fun MessageTimeline(
         }
         val countChanged = entries.size != lastCount
         lastCount = entries.size
-        if (!countChanged && !listState.isAtBottom()) return@LaunchedEffect
-        listState.scrollToItem(entries.lastIndex + headerCount)
+        if (!countChanged && !followLatest) return@LaunchedEffect
+        listState.scrollToTimelineEnd(
+            index = entries.lastIndex + headerCount,
+            bottomClearancePx = with(density) { ComposerClearance.toPx() },
+        )
+        followLatest = true
         settled = true
-        // 最后一条可能比屏幕高：scrollToItem 只对齐顶部，再补一次溢出量让视口停在尾部。
-        val info = listState.layoutInfo
-        val lastInfo = info.visibleItemsInfo.lastOrNull() ?: return@LaunchedEffect
-        val overflow = lastInfo.offset + lastInfo.size - info.viewportEndOffset
-        if (overflow > 0) {
-            runCatching<Unit> { listState.scrollBy(overflow.toFloat()) }
-        }
     }
 
     // 更早的一页插入后：把锚定的那条消息滚回原来的屏幕位置，避免列表整体跳动。
@@ -181,43 +201,154 @@ fun MessageTimeline(
         return
     }
 
-    // 键盘升降是一段逐帧动画：输入区由输入框的 IME inset 抬起，这里让列表按同样的
-    // 增量滚动，最新消息就会跟着键盘同步上移/回落，而不是等键盘到位后被盖住。
-    // 只在用户本来贴着底部时补偿，正在上滑读历史时不动。
+    val showScrollToBottom by remember(listState) {
+        derivedStateOf { !listState.isAtBottom(margin = 24) }
+    }
+
+    // 只有用户主动滚动时才更新“跟随最新消息”状态；布局因键盘变化而缩短不会改变它。
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            listState.isScrollInProgress to listState.isAtBottom(margin = 24)
+        }.collect { (scrolling, atBottom) ->
+            if (scrolling || atBottom) followLatest = atBottom
+        }
+    }
+
+    // 键盘展开时滚动范围增加，需要按同一增量跟到底部。收起时滚动范围减少，
+    // LazyColumn 会自动把越界位置夹回新的最大值；这里不能再补负增量，
+    // 否则每次收起都会把内容额外往下推一截，反复开合后逐渐被输入框遮挡。
     LaunchedEffect(listState, density, imeInsets) {
         var lastImeBottom = imeInsets.getBottom(density)
         snapshotFlow { imeInsets.getBottom(density) }.collect { current ->
             val delta = current - lastImeBottom
             lastImeBottom = current
-            if (delta == 0) return@collect
+            if (delta <= 0f) return@collect
             if (listState.layoutInfo.totalItemsCount == 0) return@collect
-            if (!listState.isAtBottom()) return@collect
+            if (!followLatest) return@collect
             listState.scrollBy(delta.toFloat())
         }
     }
 
-    LazyColumn(
-        state = listState,
-        modifier = modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(
-            start = 18.dp,
-            end = 18.dp,
-            top = 8.dp,
-            // 输入区留白 + 键盘高度：键盘弹起时最新消息停在输入框上方。
-            bottom = ComposerClearance + imeBottom,
-        ),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .imePadding(),
     ) {
-        if (hasOlder) {
-            item(key = "__older_history__") {
-                OlderHistoryRow(loading = loadingOlder, onLoad = onLoadOlder)
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(
+                start = 18.dp,
+                end = 18.dp,
+                top = 8.dp,
+                // 输入区留白；键盘高度已经由外层 imePadding 缩短视口。
+                bottom = ComposerClearance,
+            ),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            if (hasOlder) {
+                item(key = "__older_history__") {
+                    OlderHistoryRow(loading = loadingOlder, onLoad = onLoadOlder)
+                }
+            }
+            items(count = entries.size, key = { index -> keys[index] }) { index ->
+                when (val entry = entries[index]) {
+                    is TimelineEntry.Single -> MessageRow(entry.message, workStepDisplay)
+                    is TimelineEntry.WorkGroup -> WorkGroupCard(entry, workStepDisplay)
+                }
             }
         }
-        items(count = entries.size, key = { index -> keys[index] }) { index ->
-            when (val entry = entries[index]) {
-                is TimelineEntry.Single -> MessageRow(entry.message, workStepDisplay)
-                is TimelineEntry.WorkGroup -> WorkGroupCard(entry, workStepDisplay)
-            }
+
+        ScrollToBottomButton(
+            visible = showScrollToBottom,
+            onClick = {
+                scope.launch {
+                    val lastIndex = entries.lastIndex + headerCount
+                    listState.scrollToTimelineEnd(
+                        index = lastIndex,
+                        bottomClearancePx = with(density) { ComposerClearance.toPx() },
+                    )
+                    followLatest = true
+                    settled = true
+                }
+            },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = ScrollToBottomClearance),
+        )
+    }
+}
+
+/**
+ * 先定位最后一条，再补上条目自身溢出和输入区预留高度。
+ * 这样最后一条消息会停在输入框上方，而不是停在列表的视口底边。
+ */
+private suspend fun LazyListState.scrollToTimelineEnd(index: Int, bottomClearancePx: Float) {
+    scrollToItem(index)
+    val info = layoutInfo
+    val lastInfo = info.visibleItemsInfo.lastOrNull() ?: return
+    val overflow = (lastInfo.offset + lastInfo.size - info.viewportEndOffset).coerceAtLeast(0)
+    val delta = overflow + bottomClearancePx
+    if (delta > 0f) {
+        runCatching<Unit> { scrollBy(delta) }
+    }
+}
+
+/** 消息下方还有内容时出现的快捷按钮；点击后直接跳到时间线末尾。 */
+@Composable
+private fun ScrollToBottomButton(
+    visible: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    val label = stringResource(R.string.chat_scroll_to_bottom)
+
+    AnimatedVisibility(
+        visible = visible,
+        modifier = modifier,
+        enter = fadeIn(tween(120)) + scaleIn(
+            initialScale = 0.9f,
+            animationSpec = tween(140),
+        ),
+        exit = fadeOut(tween(90)) + scaleOut(
+            targetScale = 0.9f,
+            animationSpec = tween(110),
+        ),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(42.dp)
+                .shadow(
+                    elevation = 8.dp,
+                    shape = CircleShape,
+                    clip = false,
+                    ambientColor = Color.Black.copy(alpha = 0.10f),
+                    spotColor = Color.Black.copy(alpha = 0.14f),
+                )
+                .clip(CircleShape)
+                .background(colorScheme.surface)
+                .border(
+                    width = 1.dp,
+                    color = colorScheme.outline.copy(alpha = 0.24f),
+                    shape = CircleShape,
+                )
+                .clickable(
+                    onClickLabel = label,
+                    role = Role.Button,
+                    onClick = onClick,
+                )
+                .semantics { contentDescription = label },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = MiuixIcons.Regular.ChevronForward,
+                contentDescription = null,
+                tint = colorScheme.onSurface,
+                modifier = Modifier
+                    .size(18.dp)
+                    .rotate(90f),
+            )
         }
     }
 }
