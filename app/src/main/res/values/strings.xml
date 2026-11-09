@@ -42,7 +42,7 @@
     <string name="settings_connected_toast">已连接 %1$s</string>
     <string name="settings_connecting_toast">正在连接 %1$s…</string>
     <string name="settings_notifications_title">通知推送</string>
-    <string name="settings_notifications_desc">关闭后审批与提问都不再推送通知</string>
+    <string name="settings_notifications_desc">关闭后审批、提问与任务完成都不再推送通知</string>
     <string name="settings_notifications_permission_denied">没有通知权限，请在系统设置里允许通知</string>
     <string name="settings_notifications_permission_title">通知权限</string>
     <string name="settings_notifications_permission_granted">已授权</string>
@@ -54,7 +54,9 @@
     <string name="settings_notifications_approval_desc">有工具审批时推送到通知栏，可直接在通知上处理</string>
     <string name="settings_notifications_question_title">提问提醒</string>
     <string name="settings_notifications_question_desc">DSH 向你提问时推送到通知栏</string>
-    <string name="settings_notifications_system_title">审批与提问通知设置</string>
+    <string name="settings_notifications_completion_title">任务完成提醒</string>
+    <string name="settings_notifications_completion_desc">对话跑完一轮后弹窗提醒，点通知回到对应对话</string>
+    <string name="settings_notifications_system_title">审批、提问与任务完成通知设置</string>
     <string name="settings_notifications_system_desc">在系统设置中开启悬浮通知和声音</string>
     <string name="settings_about_title">基础信息</string>
     <string name="settings_app_label">应用</string>

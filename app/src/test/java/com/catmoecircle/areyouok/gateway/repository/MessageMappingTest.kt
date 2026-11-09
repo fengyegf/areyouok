@@ -85,6 +85,62 @@ class MessageMappingTest {
     }
 
     @Test
+    fun `workspace instructions reminder is hidden from the chat timeline`() {
+        // 真机 bug：AGENTS.md 的 agent-instructions 被画成 SYSTEM 灰字行，
+        // 界面上就是一段 `<system-reminder> The following workspace instructions …`。
+        assertNull(
+            MessageMapping.userRole(
+                message(
+                    "<system-reminder>\nThe following workspace instructions may be relevant to your work. …",
+                    MessageSource(kind = "agent-instructions", form = "instructions"),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `unknown context kind wrapped in system-reminder stays hidden`() {
+        // DSH 以后新增的上下文来源（tmux-context、hooks…）同样用
+        // `<system-reminder>` 包裹：按文本兜底，不能漏进时间线。
+        assertNull(
+            MessageMapping.userRole(
+                message(
+                    "<system-reminder>\nCompaction checkpoint …",
+                    MessageSource(kind = "future-context-kind"),
+                ),
+            ),
+        )
+        // 没有 source 的旧网关数据也走同一条兜底。
+        assertNull(MessageMapping.userRole(message("<system-reminder>\nA skill is …")))
+    }
+
+    @Test
+    fun `model-facing instruction context is hidden`() {
+        // 技能正文、重复调用提醒、目标轮次：正文是给模型的指令，不是聊天内容。
+        assertNull(
+            MessageMapping.userRole(
+                message(
+                    "<skill_content name=\"karpathy-guidelines\">…",
+                    MessageSource(kind = "skill-invocation"),
+                ),
+            ),
+        )
+        assertNull(
+            MessageMapping.userRole(
+                message(
+                    "You are repeating the exact same tool call with identical arguments.",
+                    MessageSource(kind = "repeat-tool-reminder"),
+                ),
+            ),
+        )
+        assertNull(
+            MessageMapping.userRole(
+                message("<goal_round>\nObjective: 修好网关重连", MessageSource(kind = "goal")),
+            ),
+        )
+    }
+
+    @Test
     fun `old gateway without source falls back to text prefixes`() {
         // 老网关不返回 source：按文本前缀识别机器注入内容。
         assertNull(MessageMapping.userRole(message("Current runtime context. snapshot …")))

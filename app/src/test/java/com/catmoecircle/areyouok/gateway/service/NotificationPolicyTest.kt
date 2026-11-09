@@ -2,6 +2,8 @@ package com.catmoecircle.areyouok.gateway.service
 
 import com.catmoecircle.areyouok.gateway.protocol.Intervention
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** 审批/提问通知的细分开关过滤。 */
@@ -63,5 +65,89 @@ class NotificationPolicyTest {
         )
 
         assertEquals(emptyList<Intervention>(), visible)
+    }
+
+    @Test
+    fun `task completion notifies when the app is away`() {
+        assertTrue(
+            NotificationPolicy.shouldNotifyCompletion(
+                sessionId = "s1",
+                selectedSessionId = "s1",
+                appVisible = false,
+                notificationsEnabled = true,
+                completionsEnabled = true,
+                permissionGranted = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `task completion is suppressed while watching the same conversation`() {
+        // 用户正看着这个对话、结果就在眼前：不重复弹提醒。
+        assertFalse(
+            NotificationPolicy.shouldNotifyCompletion(
+                sessionId = "s1",
+                selectedSessionId = "s1",
+                appVisible = true,
+                notificationsEnabled = true,
+                completionsEnabled = true,
+                permissionGranted = true,
+            ),
+        )
+        // 前台但看的是别的对话：仍然提醒，点通知回到结束的那个对话。
+        assertTrue(
+            NotificationPolicy.shouldNotifyCompletion(
+                sessionId = "s1",
+                selectedSessionId = "s2",
+                appVisible = true,
+                notificationsEnabled = true,
+                completionsEnabled = true,
+                permissionGranted = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `task completion respects switches and permission`() {
+        assertTrue(
+            NotificationPolicy.shouldNotifyCompletion(
+                sessionId = "s1",
+                selectedSessionId = null,
+                appVisible = false,
+                notificationsEnabled = true,
+                completionsEnabled = true,
+                permissionGranted = true,
+            ),
+        )
+        assertFalse(
+            NotificationPolicy.shouldNotifyCompletion(
+                sessionId = "s1",
+                selectedSessionId = null,
+                appVisible = false,
+                notificationsEnabled = false,
+                completionsEnabled = true,
+                permissionGranted = true,
+            ),
+        )
+        assertFalse(
+            NotificationPolicy.shouldNotifyCompletion(
+                sessionId = "s1",
+                selectedSessionId = null,
+                appVisible = false,
+                notificationsEnabled = true,
+                completionsEnabled = false,
+                permissionGranted = true,
+            ),
+        )
+        assertFalse(
+            NotificationPolicy.shouldNotifyCompletion(
+                sessionId = "s1",
+                selectedSessionId = null,
+                appVisible = false,
+                notificationsEnabled = true,
+                completionsEnabled = true,
+                permissionGranted = false,
+            ),
+        )
     }
 }

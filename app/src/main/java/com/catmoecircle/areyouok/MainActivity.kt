@@ -26,7 +26,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         val runtime = GatewayRuntime.get(this)
-        handleGatewayIntent(intent, runtime)
+        handleIntent(intent, runtime)
         requestNotificationPermissionIfNeeded()
         runtime.startDiscovery()
 
@@ -43,12 +43,34 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleGatewayIntent(intent, GatewayRuntime.get(this))
+        handleIntent(intent, GatewayRuntime.get(this))
     }
 
-    /** `dshgw://pair?url=…&code=…&fp=…&n=…` → 打开设置页并预填配对区。 */
-    private fun handleGatewayIntent(intent: Intent?, runtime: GatewayRuntime) {
-        val data = intent?.data ?: return
+    override fun onStart() {
+        super.onStart()
+        // 「任务完成」提醒用：用户正看着某个会话时不打扰。
+        GatewayRuntime.get(this).setAppVisible(true)
+    }
+
+    override fun onStop() {
+        GatewayRuntime.get(this).setAppVisible(false)
+        super.onStop()
+    }
+
+    /**
+     * 处理通知/深链入口：
+     * - 通知点击带 `sessionId` → 请求切到对应对话（审批 / 提问 / 任务完成通知都走这里）；
+     * - `dshgw://pair?url=…&code=…&fp=…&n=…` → 打开设置页并预填配对区。
+     */
+    private fun handleIntent(intent: Intent?, runtime: GatewayRuntime) {
+        if (intent == null) return
+        // 读一次就移除：屏幕旋转/进程内重建复用同一个 Intent 时不要再次跳转。
+        intent.getStringExtra(GatewayService.EXTRA_SESSION_ID)
+            ?.takeIf { it.isNotBlank() }
+            ?.let(runtime::requestOpenSession)
+        intent.removeExtra(GatewayService.EXTRA_SESSION_ID)
+
+        val data = intent.data ?: return
         PairInviteParser.parse(data.toString())?.let { runtime.offerInvite(it) }
     }
 

@@ -8,6 +8,9 @@ val SurfaceLight = Color(0xFFFFFFFF)
 val InkLight = Color(0xFF161618)
 val MutedLight = Color(0xFF8B8B90)
 
+// 设置页画布：比聊天画布再浅一点，让白色分组卡片更接近系统设置页的层次。
+val SettingsCanvasLight = Color(0xFFF7F7F7)
+
 // 深色主题：近黑画布 + 抬升的输入框表面。
 val CanvasDark = Color(0xFF0B0B0C)
 val SurfaceDark = Color(0xFF1C1C1E)

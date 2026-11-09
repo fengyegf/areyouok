@@ -224,6 +224,7 @@ fun ChatScreen(modifier: Modifier = Modifier) {
     }
     val invite by runtime.pendingInvite.collectAsState()
     val discoveredGateways by runtime.discovery.gateways.collectAsState()
+    val openSessionRequest by runtime.openSessionRequest.collectAsState()
 
     var draft by rememberSaveable { mutableStateOf("") }
     var sidebarOpen by rememberSaveable { mutableStateOf(false) }
@@ -235,6 +236,7 @@ fun ChatScreen(modifier: Modifier = Modifier) {
     var notificationsEnabled by remember { mutableStateOf(runtime.settings.notificationsEnabled) }
     var notifyApprovals by remember { mutableStateOf(runtime.settings.notifyApprovals) }
     var notifyQuestions by remember { mutableStateOf(runtime.settings.notifyQuestions) }
+    var notifyCompletion by remember { mutableStateOf(runtime.settings.notifyCompletion) }
     var workStepDisplay by remember {
         mutableStateOf(WorkStepDisplay.fromStorage(runtime.settings.workStepDisplay))
     }
@@ -357,6 +359,18 @@ fun ChatScreen(modifier: Modifier = Modifier) {
         repository.notices.collect { notice ->
             Toast.makeText(context, notice.text, Toast.LENGTH_SHORT).show()
         }
+    }
+
+    // 通知点击（审批 / 提问 / 任务完成）：切到通知对应的会话。
+    // 冷启动时先等连接和会话列表就绪，否则会被「默认选中第一个会话」覆盖。
+    LaunchedEffect(openSessionRequest, connection.phase, sessions) {
+        val request = openSessionRequest ?: return@LaunchedEffect
+        if (!connection.isOnline || sessions.isEmpty()) return@LaunchedEffect
+        settingsOpen = false
+        sidebarOpen = false
+        focusManager.clearFocus()
+        repository.selectSession(request.sessionId)
+        runtime.consumeOpenSession()
     }
 
     LaunchedEffect(invite) {
@@ -493,6 +507,7 @@ fun ChatScreen(modifier: Modifier = Modifier) {
                 notificationsEnabled = notificationsEnabled,
                 notifyApprovals = notifyApprovals,
                 notifyQuestions = notifyQuestions,
+                notifyCompletion = notifyCompletion,
                 notificationPermissionGranted = notificationPermissionGranted,
                 workStepDisplay = workStepDisplay,
                 workStepCollapseTiming = workStepCollapseTiming,
@@ -559,6 +574,10 @@ fun ChatScreen(modifier: Modifier = Modifier) {
                     notifyQuestions = enabled
                     runtime.settings.notifyQuestions = enabled
                     GatewayService.refreshNotifications(context)
+                },
+                onCompletionChange = { enabled ->
+                    notifyCompletion = enabled
+                    runtime.settings.notifyCompletion = enabled
                 },
                 onWorkStepDisplayChange = { level ->
                     workStepDisplay = level

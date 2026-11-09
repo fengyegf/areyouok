@@ -57,6 +57,40 @@ class GatewayRuntime private constructor(context: Context) {
     private val _pendingInvite = MutableStateFlow<PairInvite?>(null)
     val pendingInvite: StateFlow<PairInvite?> = _pendingInvite.asStateFlow()
 
+    /**
+     * 通知点击要打开的会话。
+     *
+     * 通知的 `PendingIntent` 只带 sessionId；Activity 把它转成这个请求，ChatScreen
+     * 消费后切到对应对话（等连接就绪/会话列表加载完再切，冷启动也不会被
+     * 「默认选中第一个会话」覆盖）。
+     */
+    data class OpenSessionRequest(val sessionId: String, val stamp: Long)
+
+    private val _openSessionRequest = MutableStateFlow<OpenSessionRequest?>(null)
+    val openSessionRequest: StateFlow<OpenSessionRequest?> = _openSessionRequest.asStateFlow()
+
+    fun requestOpenSession(sessionId: String) {
+        if (sessionId.isBlank()) return
+        _openSessionRequest.value = OpenSessionRequest(sessionId, System.currentTimeMillis())
+    }
+
+    fun consumeOpenSession() {
+        _openSessionRequest.value = null
+    }
+
+    /**
+     * App 是否在前台（`MainActivity.onStart`/`onStop` 维护）。
+     *
+     * 「任务完成」通知用它避免打扰：用户正看着这个会话时不再弹提醒。
+     */
+    @Volatile
+    var appVisible: Boolean = false
+        private set
+
+    fun setAppVisible(visible: Boolean) {
+        appVisible = visible
+    }
+
     val deviceName: String =
         listOf(Build.MANUFACTURER, Build.MODEL)
             .filter { it.isNotBlank() }

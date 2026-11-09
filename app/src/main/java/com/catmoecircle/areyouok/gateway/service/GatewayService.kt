@@ -25,6 +25,7 @@ import com.catmoecircle.areyouok.gateway.protocol.Intervention
 import com.catmoecircle.areyouok.gateway.protocol.InterventionAnswer
 import com.catmoecircle.areyouok.gateway.repository.ConnectionPhase
 import com.catmoecircle.areyouok.gateway.repository.ConnectionState
+import com.catmoecircle.areyouok.gateway.repository.SessionCompletion
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -39,7 +40,9 @@ import kotlinx.serialization.json.JsonPrimitive
  * - 常驻通知「DSH 网关 · <name>」：连接状态、断开/重连入口；
  * - 审批通知两个 action「允许一次 / 拒绝」，`PendingIntent` 直接回到服务里
  *   `POST /v1/interventions/{eventId}/answer`，不必打开界面；
- * - Android 13+ 未授予 POST_NOTIFICATIONS 时降级：前台服务照常运行，但不再发审批通知。
+ * - 审批 / 提问 / 任务完成通知点击后都带上 `sessionId`，由 MainActivity 切到对应对话；
+ * - 会话跑完一轮（running true → false）弹「任务完成」，用户正看着该会话时不打扰；
+ * - Android 13+ 未授予 POST_NOTIFICATIONS 时降级：前台服务照常运行，但不再发通知。
  */
 class GatewayService : Service() {
 
@@ -63,6 +66,12 @@ class GatewayService : Service() {
         scope.launch {
             runtime.repository.pendingInterventions.collectLatest { interventions ->
                 syncInterventionNotifications(interventions)
+            }
+        }
+        // 会话跑完一轮 → 弹「任务完成」，点通知回到对应对话。
+        scope.launch {
+            runtime.repository.sessionCompletions.collect { completion ->
+                notifySessionCompleted(completion)
             }
         }
         if (!runtime.repository.connection.value.isOnline) {
@@ -143,7 +152,7 @@ class GatewayService : Service() {
             .setSmallIcon(R.drawable.ic_stat_gateway)
             .setContentTitle(title)
             .setContentText(text)
-            .setContentIntent(openAppPendingIntent())
+            .setContentIntent(openAppPendingIntent(requestCode = openAppRequestCode(CONNECTION_NOTIFICATION_ID)))
             .setOngoing(true)
             .setSilent(true)
             .setOnlyAlertOnce(true)
@@ -173,6 +182,13 @@ class GatewayService : Service() {
         if (!foregroundStarted) return
         runCatching {
             syncInterventionNotifications(runtime.repository.pendingInterventions.value)
+            // 总开关或「任务完成提醒」关掉后，把还挂在通知栏的完成提醒一起撤掉。
+            if (!canPostNotifications() || !runtime.settings.notifyCompletion) {
+                postedTaskIds.values.forEach { notificationId ->
+                    runCatching { notificationManager.cancel(notificationId) }
+                }
+                postedTaskIds.clear()
+            }
         }
     }
 
@@ -203,12 +219,15 @@ class GatewayService : Service() {
             val notificationId = notificationIdFor(intervention.eventId)
             postedInterventionIds[intervention.eventId] = notificationId
             runCatching {
-                notificationManager.notify(notificationId, buildInterventionNotification(intervention))
+                notificationManager.notify(
+                    notificationId,
+                    buildInterventionNotification(intervention, notificationId),
+                )
             }
         }
     }
 
-    private fun buildInterventionNotification(intervention: Intervention): Notification {
+    private fun buildInterventionNotification(intervention: Intervention, notificationId: Int): Notification {
         val isApproval = intervention.isApproval
         val title = if (isApproval) {
             "需要审批：${intervention.toolName ?: "工具调用"}"
@@ -222,12 +241,17 @@ class GatewayService : Service() {
                 ?: intervention.reason
                 ?: "打开 App 回答问题"
         }
+        // 点通知回到「发起审批/提问的那个会话」，而不是 App 上次停在哪。
+        val openApp = openAppPendingIntent(
+            sessionId = intervention.sessionId,
+            requestCode = openAppRequestCode(notificationId),
+        )
         val builder = NotificationCompat.Builder(this, GatewayChannels.INTERVENTIONS)
             .setSmallIcon(R.drawable.ic_stat_gateway)
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-            .setContentIntent(openAppPendingIntent())
+            .setContentIntent(openApp)
             .setAutoCancel(true)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -247,10 +271,54 @@ class GatewayService : Service() {
             builder.addAction(
                 0,
                 "打开回答",
-                openAppPendingIntent(),
+                openApp,
             )
         }
         return builder.build()
+    }
+
+    /**
+     * 会话跑完一轮：弹「任务完成」通知，点一下回到该对话。
+     *
+     * 用户正看着这个会话（前台 + 选中）时不打扰；看别的会话或 App 在后台时照常提醒。
+     */
+    private fun notifySessionCompleted(completion: SessionCompletion) {
+        val shouldNotify = NotificationPolicy.shouldNotifyCompletion(
+            sessionId = completion.sessionId,
+            selectedSessionId = runtime.repository.selectedSessionId.value,
+            appVisible = runtime.appVisible,
+            notificationsEnabled = runtime.settings.notificationsEnabled,
+            completionsEnabled = runtime.settings.notifyCompletion,
+            permissionGranted = hasNotificationPermission(),
+        )
+        if (!shouldNotify) return
+        val notificationId = taskNotificationId(completion.sessionId)
+        postedTaskIds[completion.sessionId] = notificationId
+        runCatching {
+            notificationManager.notify(notificationId, buildTaskNotification(completion, notificationId))
+        }
+    }
+
+    private fun buildTaskNotification(completion: SessionCompletion, notificationId: Int): Notification {
+        val name = completion.title?.takeIf { it.isNotBlank() }
+            ?: completion.sessionId.take(8)
+        val text = "任务已完成，点击回到该对话查看结果"
+        return NotificationCompat.Builder(this, GatewayChannels.TASKS)
+            .setSmallIcon(R.drawable.ic_stat_gateway)
+            .setContentTitle("任务完成 · $name")
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setContentIntent(
+                openAppPendingIntent(
+                    sessionId = completion.sessionId,
+                    requestCode = openAppRequestCode(notificationId),
+                ),
+            )
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .build()
     }
 
     private fun handleAnswer(intent: Intent) {
@@ -262,27 +330,43 @@ class GatewayService : Service() {
         }
     }
 
-    private fun canPostNotifications(): Boolean {
-        if (!runtime.settings.notificationsEnabled) return false
-        val granted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+    private fun canPostNotifications(): Boolean =
+        runtime.settings.notificationsEnabled && hasNotificationPermission()
+
+    /** Android 13+ 的 POST_NOTIFICATIONS 权限；低版本默认有。 */
+    private fun hasNotificationPermission(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
             ContextCompat.checkSelfPermission(
                 this,
                 Manifest.permission.POST_NOTIFICATIONS,
             ) == PackageManager.PERMISSION_GRANTED
-        return granted
-    }
 
-    private fun openAppPendingIntent(): PendingIntent {
+    /**
+     * 打开 App 的 `PendingIntent`。
+     *
+     * `PendingIntent` 的相等性只看 action/data/component，不看 extras：每个通知必须
+     * 用不同的 requestCode，否则不同会话的通知点开后会共用同一个 PendingIntent，
+     * 全部跳到最后一个会话。带 `sessionId` 时 MainActivity 会切到对应对话。
+     */
+    private fun openAppPendingIntent(
+        sessionId: String? = null,
+        requestCode: Int = openAppRequestCode(CONNECTION_NOTIFICATION_ID),
+    ): PendingIntent {
         val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
+            sessionId?.takeIf { it.isNotBlank() }?.let { putExtra(EXTRA_SESSION_ID, it) }
         }
         return PendingIntent.getActivity(
             this,
-            REQUEST_OPEN_APP,
+            requestCode,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
     }
+
+    private fun openAppRequestCode(notificationId: Int): Int = OPEN_APP_REQUEST_BASE + notificationId
 
     private fun servicePendingIntent(action: String, requestCode: Int): PendingIntent {
         val intent = Intent(this, GatewayService::class.java).setAction(action)
@@ -308,7 +392,10 @@ class GatewayService : Service() {
     }
 
     private fun notificationIdFor(eventId: String): Int =
-        INTERVENTION_NOTIFICATION_BASE + (eventId.hashCode() and 0x0FFF)
+        INTERVENTION_NOTIFICATION_BASE + (eventId.hashCode() and 0x03FF)
+
+    private fun taskNotificationId(sessionId: String): Int =
+        TASK_NOTIFICATION_BASE + (sessionId.hashCode() and 0x03FF)
 
     companion object {
         private const val TAG = "GatewayService"
@@ -320,13 +407,25 @@ class GatewayService : Service() {
         const val EXTRA_EVENT_ID = "eventId"
         const val EXTRA_ANSWER_VALUE = "answerValue"
 
+        /** 通知点击要打开的会话 id：MainActivity 读完即消费。 */
+        const val EXTRA_SESSION_ID = "sessionId"
+
         private const val CONNECTION_NOTIFICATION_ID = 1001
+
+        // 通知 id 区间互不重叠：审批/提问 2000–3023，任务完成 4000–5023。
         private const val INTERVENTION_NOTIFICATION_BASE = 2000
-        private const val REQUEST_OPEN_APP = 21
+        private const val TASK_NOTIFICATION_BASE = 4000
+
+        // PendingIntent 相等性不看 extras，用「通知 id + 固定偏移」保证每个通知独立。
+        private const val OPEN_APP_REQUEST_BASE = 10_000
         private const val ALLOW_ONCE_LABEL = "允许一次"
         private const val REJECT_LABEL = "拒绝"
 
         private val postedInterventionIds =
+            java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+        /** 已发的「任务完成」通知：关开关时用来撤销。 */
+        private val postedTaskIds =
             java.util.concurrent.ConcurrentHashMap<String, Int>()
 
         fun start(context: Context) {
@@ -364,6 +463,7 @@ class GatewayService : Service() {
 object GatewayChannels {
     const val CONNECTION = "gateway_connection"
     const val INTERVENTIONS = "gateway_interventions_v2"
+    const val TASKS = "gateway_tasks"
     private const val LEGACY_INTERVENTIONS = "gateway_interventions"
 
     fun ensure(context: Context) {
@@ -392,9 +492,25 @@ object GatewayChannels {
             )
             enableVibration(true)
         }
+        // 任务完成用独立渠道：可以单独调静音/关悬浮，不影响审批与提问。
+        val tasks = NotificationChannel(
+            TASKS,
+            "任务完成",
+            NotificationManager.IMPORTANCE_HIGH,
+        ).apply {
+            description = "对话跑完一轮后提醒，点通知回到对应对话"
+            setSound(
+                Settings.System.DEFAULT_NOTIFICATION_URI,
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build(),
+            )
+            enableVibration(false)
+        }
         // 渠道的重要性和声音一旦被用户或系统降级，App 无法在原渠道上恢复。
         // 删除旧渠道，让新版本按高优先级和系统默认声音重新建立。
         manager.deleteNotificationChannel(LEGACY_INTERVENTIONS)
-        manager.createNotificationChannels(listOf(connection, interventions))
+        manager.createNotificationChannels(listOf(connection, interventions, tasks))
     }
 }

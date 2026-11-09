@@ -51,6 +51,11 @@ class GatewaySettings(context: Context) {
         get() = prefs.getBoolean(KEY_NOTIFY_QUESTIONS, true)
         set(value) = prefs.edit().putBoolean(KEY_NOTIFY_QUESTIONS, value).apply()
 
+    /** 是否推送「任务完成」通知（[notificationsEnabled] 为总开关）。 */
+    var notifyCompletion: Boolean
+        get() = prefs.getBoolean(KEY_NOTIFY_COMPLETION, true)
+        set(value) = prefs.edit().putBoolean(KEY_NOTIFY_COMPLETION, value).apply()
+
     fun remember(endpoint: GatewayEndpoint) {
         lastBaseUrl = endpoint.baseUrl
         lastName = endpoint.name
@@ -99,6 +104,7 @@ class GatewaySettings(context: Context) {
         private const val KEY_NOTIFICATIONS = "notifications_enabled"
         private const val KEY_NOTIFY_APPROVALS = "notify_approvals"
         private const val KEY_NOTIFY_QUESTIONS = "notify_questions"
+        private const val KEY_NOTIFY_COMPLETION = "notify_completion"
         private const val KEY_RECENT = "recent_gateways"
         private const val MAX_RECENT = 8
     }

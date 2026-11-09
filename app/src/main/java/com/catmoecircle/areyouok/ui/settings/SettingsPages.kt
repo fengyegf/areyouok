@@ -65,11 +65,10 @@ internal fun SettingsConnectionPage(
     onDisconnectDevice: () -> Unit,
     onAddConnection: () -> Unit,
 ) {
-    SettingsPageScaffold {
+    SettingsPageScaffold(title = stringResource(R.string.settings_page_connection)) {
         SettingsGroup(title = stringResource(R.string.settings_section_connection)) {
             if (devices.isEmpty()) {
                 SettingsEmptyDeviceRow()
-                SettingsDivider(startInset = 16.dp)
             } else {
                 devices.forEach { device ->
                     SettingsDeviceRow(
@@ -79,7 +78,6 @@ internal fun SettingsConnectionPage(
                         onConnect = { onConnectDevice(device) },
                         onDisconnect = onDisconnectDevice,
                     )
-                    SettingsDivider()
                 }
             }
 
@@ -101,28 +99,30 @@ private fun SettingsEmptyDeviceRow() {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+            .padding(horizontal = 20.dp, vertical = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
             imageVector = MiuixIcons.Regular.ScreenMirroring,
             contentDescription = null,
-            tint = colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(22.dp),
+            tint = colorScheme.onSurface.copy(alpha = 0.62f),
+            modifier = Modifier.size(24.dp),
         )
-        Spacer(Modifier.width(14.dp))
+        Spacer(Modifier.width(20.dp))
         Column {
             Text(
                 text = stringResource(R.string.settings_devices_empty),
                 color = colorScheme.onSurface,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
+                fontSize = 18.sp,
+                lineHeight = 24.sp,
+                fontWeight = FontWeight.SemiBold,
             )
-            Spacer(Modifier.height(2.dp))
+            Spacer(Modifier.height(4.dp))
             Text(
                 text = stringResource(R.string.settings_devices_empty_desc),
                 color = colorScheme.onSurfaceVariant,
-                fontSize = 11.sp,
+                fontSize = 15.sp,
+                lineHeight = 20.sp,
             )
         }
     }
@@ -161,35 +161,37 @@ private fun SettingsDeviceRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 11.dp),
+            .padding(horizontal = 20.dp, vertical = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
             imageVector = MiuixIcons.Regular.ScreenMirroring,
             contentDescription = null,
-            tint = if (active) colorScheme.primary else colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(22.dp),
+            tint = if (active) colorScheme.primary else colorScheme.onSurface.copy(alpha = 0.62f),
+            modifier = Modifier.size(24.dp),
         )
-        Spacer(Modifier.width(14.dp))
+        Spacer(Modifier.width(20.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = name,
                 color = colorScheme.onSurface,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Medium,
+                fontSize = 18.sp,
+                lineHeight = 24.sp,
+                fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Spacer(Modifier.height(2.dp))
+            Spacer(Modifier.height(4.dp))
             Text(
                 text = status,
                 color = statusColor,
-                fontSize = 11.sp,
+                fontSize = 15.sp,
+                lineHeight = 20.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(16.dp))
         Switch(
             checked = active,
             onCheckedChange = { enabled ->
@@ -225,7 +227,7 @@ internal fun SettingsGatewayPage(
     var url by rememberSaveable(initialUrl) { mutableStateOf(initialUrl) }
     var code by rememberSaveable(initialCode) { mutableStateOf(initialCode) }
 
-    SettingsPageScaffold {
+    SettingsPageScaffold(title = stringResource(R.string.settings_page_gateway)) {
         SettingsGroup(title = stringResource(R.string.settings_gateway_discovery_title)) {
             if (discoveredGateways.isEmpty()) {
                 SettingsNavRow(
@@ -241,7 +243,7 @@ internal fun SettingsGatewayPage(
                     showChevron = false,
                 )
             } else {
-                discoveredGateways.forEachIndexed { index, gateway ->
+                discoveredGateways.forEach { gateway ->
                     SettingsNavRow(
                         icon = MiuixIcons.Regular.ScreenMirroring,
                         title = gateway.name,
@@ -250,18 +252,15 @@ internal fun SettingsGatewayPage(
                         onClick = { onSelectDiscoveredGateway(gateway) },
                         enabled = !busy,
                     )
-                    if (index != discoveredGateways.lastIndex) {
-                        SettingsDivider()
-                    }
                 }
             }
         }
 
-        Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(32.dp))
 
         SettingsGroup(title = stringResource(R.string.settings_gateway_manual_title)) {
             Column(
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
             ) {
                 OutlinedTextField(
                     value = url,
@@ -355,7 +354,7 @@ internal fun SettingsGatewayPage(
 
         // 当前连接状态：只做只读提示，断开/重连入口在连接页。
         connection.endpoint?.baseUrl?.let { address ->
-            Spacer(Modifier.height(18.dp))
+            Spacer(Modifier.height(32.dp))
             SettingsGroup(title = stringResource(R.string.settings_gateway_current)) {
                 SettingsInfoRow(
                     label = connection.displayName,
@@ -366,7 +365,6 @@ internal fun SettingsGatewayPage(
                         null
                     },
                 )
-                SettingsDivider(startInset = 16.dp)
                 SettingsInfoRow(
                     label = stringResource(R.string.gateway_pair_url_label),
                     value = address,
@@ -377,7 +375,7 @@ internal fun SettingsGatewayPage(
 }
 
 /**
- * 通知子页：权限入口 + 通知总开关 + 审批/提问提醒。
+ * 通知子页：权限入口 + 通知总开关 + 审批 / 提问 / 任务完成提醒。
  *
  * 未授权时点「通知权限」会重新走系统授权（ChatScreen 里实现）；被永久拒绝时
  * ChatScreen 会兜底跳到系统通知设置，避免第一次取消授权后找不到入口。
@@ -387,17 +385,19 @@ internal fun SettingsNotificationPage(
     notificationsEnabled: Boolean,
     notifyApprovals: Boolean,
     notifyQuestions: Boolean,
+    notifyCompletion: Boolean,
     permissionGranted: Boolean,
     onRequestPermission: () -> Unit,
     onOpenSystemSettings: () -> Unit,
     onNotificationsChange: (Boolean) -> Unit,
     onApprovalsChange: (Boolean) -> Unit,
     onQuestionsChange: (Boolean) -> Unit,
+    onCompletionChange: (Boolean) -> Unit,
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val childEnabled = notificationsEnabled && permissionGranted
 
-    SettingsPageScaffold {
+    SettingsPageScaffold(title = stringResource(R.string.settings_page_notifications)) {
         SettingsGroup {
             SettingsNavRow(
                 icon = if (permissionGranted) MiuixIcons.Regular.Unlock else MiuixIcons.Regular.Lock,
@@ -410,7 +410,6 @@ internal fun SettingsNotificationPage(
                 valueColor = if (permissionGranted) null else colorScheme.error,
                 onClick = onRequestPermission,
             )
-            SettingsDivider()
             SettingsNavRow(
                 icon = MiuixIcons.Regular.Settings,
                 title = stringResource(R.string.settings_notifications_system_title),
@@ -419,14 +418,16 @@ internal fun SettingsNotificationPage(
             )
         }
 
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(12.dp))
         Text(
             text = stringResource(R.string.settings_notifications_permission_hint),
             color = colorScheme.onSurfaceVariant,
-            fontSize = 11.sp,
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+            modifier = Modifier.padding(horizontal = 16.dp),
         )
 
-        Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(32.dp))
 
         SettingsGroup(title = stringResource(R.string.settings_section_notifications)) {
             SettingsSwitchRow(
@@ -435,7 +436,6 @@ internal fun SettingsNotificationPage(
                 checked = notificationsEnabled,
                 onCheckedChange = onNotificationsChange,
             )
-            SettingsDivider(startInset = 16.dp)
             SettingsSwitchRow(
                 title = stringResource(R.string.settings_notifications_approval_title),
                 description = stringResource(R.string.settings_notifications_approval_desc),
@@ -443,12 +443,18 @@ internal fun SettingsNotificationPage(
                 onCheckedChange = onApprovalsChange,
                 enabled = childEnabled,
             )
-            SettingsDivider(startInset = 16.dp)
             SettingsSwitchRow(
                 title = stringResource(R.string.settings_notifications_question_title),
                 description = stringResource(R.string.settings_notifications_question_desc),
                 checked = notifyQuestions,
                 onCheckedChange = onQuestionsChange,
+                enabled = childEnabled,
+            )
+            SettingsSwitchRow(
+                title = stringResource(R.string.settings_notifications_completion_title),
+                description = stringResource(R.string.settings_notifications_completion_desc),
+                checked = notifyCompletion,
+                onCheckedChange = onCompletionChange,
                 enabled = childEnabled,
             )
         }
@@ -461,17 +467,14 @@ internal fun SettingsWorkStepDisplayPage(
     selected: WorkStepDisplay,
     onSelect: (WorkStepDisplay) -> Unit,
 ) {
-    SettingsPageScaffold {
+    SettingsPageScaffold(title = stringResource(R.string.work_step_display_title)) {
         SettingsGroup(title = stringResource(R.string.settings_section_chat)) {
-            WorkStepDisplay.entries.forEachIndexed { index, level ->
+            WorkStepDisplay.entries.forEach { level ->
                 WorkStepOptionRow(
                     level = level,
                     selected = level == selected,
                     onClick = { onSelect(level) },
                 )
-                if (index != WorkStepDisplay.entries.lastIndex) {
-                    SettingsDivider(startInset = 16.dp)
-                }
             }
         }
     }
@@ -496,33 +499,35 @@ private fun WorkStepOptionRow(
                 onClick = onClick,
             )
             .semantics { contentDescription = label }
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(horizontal = 20.dp, vertical = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = label,
                 color = colorScheme.onSurface,
-                fontSize = 15.sp,
+                fontSize = 18.sp,
+                lineHeight = 24.sp,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
             )
-            Spacer(Modifier.height(2.dp))
+            Spacer(Modifier.height(4.dp))
             Text(
                 text = stringResource(level.descriptionRes),
                 color = colorScheme.onSurfaceVariant,
-                fontSize = 11.sp,
+                fontSize = 15.sp,
+                lineHeight = 20.sp,
             )
         }
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(16.dp))
         if (selected) {
             Icon(
                 imageVector = MiuixIcons.Regular.Ok,
                 contentDescription = null,
                 tint = colorScheme.primary,
-                modifier = Modifier.size(18.dp),
+                modifier = Modifier.size(20.dp),
             )
         } else {
-            Spacer(Modifier.size(18.dp))
+            Spacer(Modifier.size(20.dp))
         }
     }
 }
@@ -530,18 +535,16 @@ private fun WorkStepOptionRow(
 /** 关于子页：基础信息（应用、设备名、版本）。 */
 @Composable
 internal fun SettingsAboutPage(deviceName: String, versionName: String) {
-    SettingsPageScaffold {
+    SettingsPageScaffold(title = stringResource(R.string.settings_page_about)) {
         SettingsGroup(title = stringResource(R.string.settings_about_title)) {
             SettingsInfoRow(
                 label = stringResource(R.string.settings_app_label),
                 value = stringResource(R.string.app_name),
             )
-            SettingsDivider(startInset = 16.dp)
             SettingsInfoRow(
                 label = stringResource(R.string.settings_device_name),
                 value = deviceName,
             )
-            SettingsDivider(startInset = 16.dp)
             SettingsInfoRow(
                 label = stringResource(R.string.settings_version),
                 value = versionName.ifBlank { "—" },

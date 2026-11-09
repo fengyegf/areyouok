@@ -99,6 +99,34 @@ class GatewayRepository(
     private val _notices = MutableSharedFlow<GatewayNotice>(extraBufferCapacity = 32)
     val notices: SharedFlow<GatewayNotice> = _notices.asSharedFlow()
 
+    private val _sessionCompletions = MutableSharedFlow<SessionCompletion>(extraBufferCapacity = 16)
+
+    /**
+     * 会话从运行中落到空闲的完成事件（全局流里所有会话都会发）。
+     *
+     * 只在「观察过 running=true」之后才发：App 启动/重连时 REST 里已经是 false 的
+     * 会话不会补发「任务完成」，避免一打开 App 就弹一堆过期提醒。
+     */
+    val sessionCompletions: SharedFlow<SessionCompletion> = _sessionCompletions.asSharedFlow()
+
+    /**
+     * 最近一次观察到的运行中会话（含未选中会话，靠 global 订阅的 `session.status` 维护）。
+     *
+     * 用它识别 true → false 的瞬间；`TURN_END` 与 `session.status` 可能同时到达，
+     * 先到的那条把状态清掉，后到的不会重复发完成事件。
+     */
+    private val runningSessions = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * 最近一次 `ready` 的 seq 边界。
+     *
+     * WS 连上后会补发 `lastAppliedSeq` 之后的历史事件（seq ≤ ready.seq），其中的
+     * 「运行 → 空闲」是过去的一轮，不能再弹「任务完成」；只有 seq 超过这个边界的
+     * 新事件才算实时完成。
+     */
+    @Volatile
+    private var replayBoundary: Long? = null
+
     private val assembler = MessageAssembler()
     private var connectionJob: Job? = null
     private var historyJob: Job? = null
@@ -224,6 +252,11 @@ class GatewayRepository(
         runCatching { transport.api.sessions(workspaceId) }.onSuccess { rawSessions ->
             val sessions = normalizeSessions(rawSessions)
             _sessions.value = sessions
+            // 只补记「正在运行」的会话：重连后它结束时仍能提醒；已经是 false 的
+            // 会话故意不补，避免把连接前的旧结束当成刚完成。
+            sessions.forEach { summary ->
+                if (summary.running) runningSessions.add(summary.id)
+            }
             val selected = _selectedSessionId.value
             if (selected == null || sessions.none { it.id == selected }) {
                 sessions.firstOrNull()?.let { selectSessionInternal(it.id) } ?: selectSessionInternal(null)
@@ -238,6 +271,8 @@ class GatewayRepository(
     private suspend fun handleStreamUpdate(update: StreamUpdate) {
         when (update) {
             is StreamUpdate.Ready -> {
+                // ready.seq 之前的事件都是补发：完成提醒只认真实时的新事件。
+                replayBoundary = update.frame.seq
                 update.frame.snapshot?.let { snapshot ->
                     if (snapshot.workspaces.isNotEmpty()) _workspaces.value = snapshot.workspaces
                     if (snapshot.sessions.isNotEmpty()) _sessions.value = normalizeSessions(snapshot.sessions)
@@ -324,7 +359,7 @@ class GatewayRepository(
 
         when (frame.eventKind()) {
             EventKind.SESSION_STATUS -> {
-                updateSessionRunning(sessionId, data.bool("running") ?: false)
+                updateSessionRunning(sessionId, data.bool("running") ?: false, frame.seq)
             }
 
             EventKind.SESSION_UPDATED -> {
@@ -370,10 +405,10 @@ class GatewayRepository(
                 publishMessages()
             }
 
-            EventKind.TURN_START -> updateSessionRunning(sessionId, true)
+            EventKind.TURN_START -> updateSessionRunning(sessionId, true, frame.seq)
 
             EventKind.TURN_END -> {
-                updateSessionRunning(sessionId, false)
+                updateSessionRunning(sessionId, false, frame.seq)
                 if (isSelected(sessionId)) {
                     assembler.finishStreaming()
                     publishMessages()
@@ -529,12 +564,35 @@ class GatewayRepository(
         }
     }
 
-    private fun updateSessionRunning(sessionId: String?, running: Boolean) {
+    private fun updateSessionRunning(sessionId: String?, running: Boolean, seq: Long? = null) {
         val id = sessionId ?: _selectedSessionId.value ?: return
+        val wasRunning = runningSessions.contains(id)
+        if (running) {
+            runningSessions.add(id)
+        } else {
+            runningSessions.remove(id)
+        }
         _sessions.value = _sessions.value.map { if (it.id == id) it.copy(running = running) else it }
         if (id == _selectedSessionId.value) {
             _sessionRunning.value = running
         }
+        if (wasRunning && !running) emitCompletion(id, seq)
+    }
+
+    /** 运行中的会话落到空闲：通知层据此弹「任务完成」；子代理会话不提醒。 */
+    private fun emitCompletion(sessionId: String, seq: Long?) {
+        // 补发/重放的历史事件（seq ≤ ready.seq）只是重建状态，不是刚跑完。
+        val boundary = replayBoundary
+        if (seq != null && boundary != null && seq <= boundary) return
+        val summary = _sessions.value.firstOrNull { it.id == sessionId } ?: return
+        if (summary.isSubagent) return
+        _sessionCompletions.tryEmit(
+            SessionCompletion(
+                sessionId = sessionId,
+                title = summary.displayTitle,
+                time = clock(),
+            ),
+        )
     }
 
     private fun addIntervention(intervention: Intervention) {
@@ -596,7 +654,10 @@ class GatewayRepository(
         _sessionRunning.value = false
         if (sessionId == null) return
         transport.subscribe(Topics.session(sessionId))
-        _sessionRunning.value = _sessions.value.firstOrNull { it.id == sessionId }?.running ?: false
+        val running = _sessions.value.firstOrNull { it.id == sessionId }?.running ?: false
+        // 打开时已经在跑：记下来，这样用户退出后它结束时也能收到「任务完成」。
+        if (running) runningSessions.add(sessionId)
+        _sessionRunning.value = running
         historyJob = scope.launch { loadHistory(sessionId) }
     }
 

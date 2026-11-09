@@ -3,6 +3,8 @@ package com.catmoecircle.areyouok.ui.settings
 import androidx.activity.compose.BackHandler
 import androidx.annotation.StringRes
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -10,12 +12,11 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -32,14 +33,11 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsBottomHeight
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -53,11 +51,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -66,15 +65,23 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
 import com.catmoecircle.areyouok.R
 import com.catmoecircle.areyouok.gateway.GatewaySettings
 import com.catmoecircle.areyouok.gateway.discovery.DiscoveredGateway
 import com.catmoecircle.areyouok.gateway.repository.ConnectionPhase
 import com.catmoecircle.areyouok.gateway.repository.ConnectionState
 import com.catmoecircle.areyouok.ui.theme.AreYouOKTheme
+import com.catmoecircle.areyouok.ui.theme.CanvasLight
+import com.catmoecircle.areyouok.ui.theme.SettingsCanvasLight
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Back
@@ -85,6 +92,7 @@ import top.yukonga.miuix.kmp.icon.extended.Ok
 import top.yukonga.miuix.kmp.icon.extended.Playlist
 import top.yukonga.miuix.kmp.icon.extended.Reply
 import top.yukonga.miuix.kmp.icon.extended.SearchDevice
+import top.yukonga.miuix.kmp.icon.extended.Stopwatch
 
 /**
  * 设置页的分类入口。
@@ -129,6 +137,7 @@ fun SettingsScreen(
     notificationsEnabled: Boolean,
     notifyApprovals: Boolean,
     notifyQuestions: Boolean,
+    notifyCompletion: Boolean,
     notificationPermissionGranted: Boolean,
     workStepDisplay: WorkStepDisplay,
     workStepCollapseTiming: WorkStepCollapseTiming,
@@ -144,6 +153,7 @@ fun SettingsScreen(
     onNotificationsChange: (Boolean) -> Unit,
     onApprovalsChange: (Boolean) -> Unit,
     onQuestionsChange: (Boolean) -> Unit,
+    onCompletionChange: (Boolean) -> Unit,
     onWorkStepDisplayChange: (WorkStepDisplay) -> Unit,
     onWorkStepCollapseTimingChange: (WorkStepCollapseTiming) -> Unit,
     onWorkStepFoldedRepliesChange: (WorkStepFoldedReplies) -> Unit,
@@ -157,6 +167,12 @@ fun SettingsScreen(
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
         }.getOrNull().orEmpty()
+    }
+    // 浅色主题下设置页用更浅的画布，让白色卡片层次更接近系统设置页。
+    val settingsBackground = if (colorScheme.background == CanvasLight) {
+        SettingsCanvasLight
+    } else {
+        colorScheme.background
     }
 
     var page by rememberSaveable { mutableStateOf(SettingsPage.ROOT) }
@@ -177,25 +193,22 @@ fun SettingsScreen(
         if (page == SettingsPage.ROOT) onBack() else page = SettingsPage.ROOT
     }
 
-    Column(
+    Box(
         modifier = modifier
             .fillMaxSize()
-            .background(colorScheme.background)
-            // 页面是盖在聊天界面之上的浮层：吞掉落在留白处的触摸，避免点穿到下面的聊天控件。
-            .pointerInput(Unit) {
-                awaitPointerEventScope {
-                    while (true) {
-                        awaitPointerEvent().changes.forEach { it.consume() }
-                    }
-                }
-            },
+            .background(settingsBackground),
     ) {
-        SettingsTopBar(
-            title = stringResource(page.titleRes),
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                // 页面是盖在聊天界面之上的浮层：吞掉落在留白处的点击，避免点穿到下面的聊天控件。
+                // 只处理点击，不拦截拖动，否则会在触摸滑动超过阈值前吞掉移动事件，导致列表滚不动。
+                .pointerInput(Unit) { detectTapGestures { } },
+        ) {
+        SettingsHeader(
             busy = busy,
-            showTitle = page != SettingsPage.ROOT,
             onBack = {
-                if (busy) return@SettingsTopBar
+                if (busy) return@SettingsHeader
                 if (page == SettingsPage.ROOT) onBack() else page = SettingsPage.ROOT
             },
         )
@@ -261,12 +274,14 @@ fun SettingsScreen(
                     notificationsEnabled = notificationsEnabled,
                     notifyApprovals = notifyApprovals,
                     notifyQuestions = notifyQuestions,
+                    notifyCompletion = notifyCompletion,
                     permissionGranted = notificationPermissionGranted,
                     onRequestPermission = onRequestNotificationPermission,
                     onOpenSystemSettings = onOpenNotificationSettings,
                     onNotificationsChange = onNotificationsChange,
                     onApprovalsChange = onApprovalsChange,
                     onQuestionsChange = onQuestionsChange,
+                    onCompletionChange = onCompletionChange,
                 )
 
                 SettingsPage.ABOUT -> SettingsAboutPage(
@@ -275,99 +290,69 @@ fun SettingsScreen(
                 )
             }
         }
+        }
     }
 }
 
 /**
- * 顶部返回栏与应用里的圆形悬浮按钮保持一致；根页面由内容区展示标题，
- * 子页在返回按钮右侧显示左对齐的紧凑标题。
+ * 顶部区域：只保留返回箭头。
+ *
+ * 页面大标题放进 [SettingsPageScaffold] 的滚动内容里，这样在标题附近滑动也能滚动，
+ * 滚动时标题随内容一起移出，不会出现内容从固定标题下方穿过的割裂感。
  */
 @Composable
-private fun SettingsTopBar(
-    title: String,
+private fun SettingsHeader(
     busy: Boolean,
-    showTitle: Boolean,
     onBack: () -> Unit,
 ) {
     val colorScheme = MaterialTheme.colorScheme
-    Box(
+
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .windowInsetsPadding(WindowInsets.statusBars)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        contentAlignment = Alignment.Center,
+            .windowInsetsPadding(WindowInsets.statusBars),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .widthIn(max = 680.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        Box(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.Center,
         ) {
-            Box(
+            Row(
                 modifier = Modifier
-                    .size(44.dp)
-                    .shadow(
-                        elevation = 8.dp,
-                        shape = CircleShape,
-                        clip = false,
-                        ambientColor = Color.Black.copy(alpha = 0.10f),
-                        spotColor = Color.Black.copy(alpha = 0.14f),
-                    )
-                    .clip(CircleShape)
-                    .background(colorScheme.surface)
-                    .border(
-                        width = 1.dp,
-                        color = colorScheme.outline.copy(alpha = 0.28f),
-                        shape = CircleShape,
-                    ),
-                contentAlignment = Alignment.Center,
+                    .fillMaxWidth()
+                    .widthIn(max = 680.dp)
+                    .padding(start = 8.dp, end = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(
                     onClick = onBack,
                     enabled = !busy,
-                    modifier = Modifier.size(44.dp),
+                    modifier = Modifier.size(48.dp),
                 ) {
                     Icon(
                         imageVector = MiuixIcons.Regular.Back,
                         contentDescription = stringResource(R.string.settings_back),
                         tint = if (busy) {
-                            colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                            colorScheme.onSurface.copy(alpha = 0.35f)
                         } else {
                             colorScheme.onSurface
                         },
-                        modifier = Modifier.size(21.dp),
+                        modifier = Modifier.size(26.dp),
                     )
                 }
             }
-
-            if (showTitle) {
-                Text(
-                    text = title,
-                    color = colorScheme.onSurface,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    textAlign = TextAlign.Start,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(start = 12.dp),
-                )
-            } else {
-                Spacer(Modifier.weight(1f))
-            }
-
-            Spacer(Modifier.size(44.dp))
         }
     }
 }
 
-/** 设置页通用滚动容器：统一最大宽度、水平留白与底部安全区。 */
+/** 设置页通用滚动容器：大标题 + 内容同属滚动区，统一最大宽度、水平留白与底部安全区。 */
 @Composable
 internal fun SettingsPageScaffold(
+    title: String,
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    val colorScheme = MaterialTheme.colorScheme
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -381,66 +366,65 @@ internal fun SettingsPageScaffold(
                 .widthIn(max = 680.dp)
                 .padding(horizontal = 16.dp),
         ) {
-            Spacer(Modifier.height(2.dp))
+            Text(
+                text = title,
+                color = colorScheme.onSurface,
+                fontSize = 34.sp,
+                lineHeight = 40.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Start,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 4.dp, top = 16.dp, bottom = 24.dp),
+            )
             content()
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(32.dp))
             Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.navigationBars))
         }
     }
 }
 
-/** 设置分组：与应用里的连接卡片共用半透明表面和描边。 */
+/**
+ * 设置分组：分组标题 + 一整块纯白圆角卡片。
+ *
+ * 卡片之间不再画分隔线，行与行靠行内留白区分；标题比卡片多缩进 16dp。
+ */
 @Composable
 internal fun SettingsGroup(
     title: String? = null,
     modifier: Modifier = Modifier,
-    contentPadding: PaddingValues = PaddingValues(vertical = 2.dp),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val colorScheme = MaterialTheme.colorScheme
-    val shape = RoundedCornerShape(18.dp)
 
     Column(modifier = modifier.fillMaxWidth()) {
         if (!title.isNullOrBlank()) {
             Text(
                 text = title,
                 color = colorScheme.onSurfaceVariant,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.padding(start = 8.dp, bottom = 8.dp),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Normal,
+                modifier = Modifier.padding(start = 16.dp, bottom = 8.dp),
             )
         }
 
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(shape)
-                .background(colorScheme.surfaceVariant.copy(alpha = 0.45f))
-                .border(
-                    width = 1.dp,
-                    color = colorScheme.outline.copy(alpha = 0.18f),
-                    shape = shape,
-                )
-                .padding(contentPadding),
+                .clip(RoundedCornerShape(22.dp))
+                .background(colorScheme.surface),
             content = content,
         )
     }
-}
-
-/** 分组内的分隔线；默认从图标列右侧开始。 */
-@Composable
-internal fun SettingsDivider(startInset: Dp = 52.dp) {
-    HorizontalDivider(
-        modifier = Modifier.padding(start = startInset, end = 16.dp),
-        thickness = 0.5.dp,
-        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f),
-    )
 }
 
 /**
  * 可点击的导航行：裸图标 + 标题/说明 + 右侧值 + 箭头。
  *
  * 分类入口（根页面）用 [value] 展示当前连接/版本等摘要；子页里的入口行只用标题。
+ * 行内留白较大（16dp 上下 / 20dp 左右），卡片里不再画分隔线。
  */
 @Composable
 internal fun SettingsNavRow(
@@ -466,46 +450,48 @@ internal fun SettingsNavRow(
         modifier = modifier
             .fillMaxWidth()
             .then(clickModifier)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(horizontal = 20.dp, vertical = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
             imageVector = icon,
             contentDescription = null,
             tint = if (enabled) {
-                colorScheme.onSurfaceVariant
+                colorScheme.onSurface.copy(alpha = 0.62f)
             } else {
-                colorScheme.onSurfaceVariant.copy(alpha = 0.42f)
+                colorScheme.onSurface.copy(alpha = 0.28f)
             },
-            modifier = Modifier.size(22.dp),
+            modifier = Modifier.size(24.dp),
         )
-        Spacer(Modifier.width(14.dp))
+        Spacer(Modifier.width(20.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = title,
                 color = contentColor,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Medium,
+                fontSize = 18.sp,
+                lineHeight = 24.sp,
+                fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             if (!description.isNullOrBlank()) {
-                Spacer(Modifier.height(2.dp))
+                Spacer(Modifier.height(4.dp))
                 Text(
                     text = description,
                     color = colorScheme.onSurfaceVariant,
-                    fontSize = 11.sp,
+                    fontSize = 15.sp,
+                    lineHeight = 20.sp,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
         }
         if (!value.isNullOrBlank()) {
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(12.dp))
             Text(
                 text = value,
                 color = valueColor ?: colorScheme.onSurfaceVariant,
-                fontSize = 13.sp,
+                fontSize = 15.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.End,
@@ -513,12 +499,12 @@ internal fun SettingsNavRow(
             )
         }
         if (showChevron) {
-            Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.width(10.dp))
             Icon(
                 imageVector = MiuixIcons.Regular.ChevronForward,
                 contentDescription = null,
-                tint = colorScheme.onSurfaceVariant.copy(alpha = if (enabled) 0.7f else 0.3f),
-                modifier = Modifier.size(14.dp),
+                tint = colorScheme.onSurfaceVariant.copy(alpha = if (enabled) 0.85f else 0.3f),
+                modifier = Modifier.size(16.dp),
             )
         }
     }
@@ -538,28 +524,30 @@ internal fun SettingsSwitchRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(horizontal = 20.dp, vertical = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = title,
                 color = if (enabled) colorScheme.onSurface else colorScheme.onSurfaceVariant,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Medium,
+                fontSize = 18.sp,
+                lineHeight = 24.sp,
+                fontWeight = FontWeight.SemiBold,
             )
             if (!description.isNullOrBlank()) {
-                Spacer(Modifier.height(2.dp))
+                Spacer(Modifier.height(4.dp))
                 Text(
                     text = description,
                     color = colorScheme.onSurfaceVariant,
-                    fontSize = 11.sp,
+                    fontSize = 15.sp,
+                    lineHeight = 20.sp,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
         }
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(16.dp))
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,
@@ -576,19 +564,20 @@ internal fun SettingsInfoRow(label: String, value: String, valueColor: Color? = 
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+            .padding(horizontal = 20.dp, vertical = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             text = label,
             color = colorScheme.onSurface,
-            fontSize = 14.sp,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.SemiBold,
         )
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(16.dp))
         Text(
             text = value,
             color = valueColor ?: colorScheme.onSurfaceVariant,
-            fontSize = 13.sp,
+            fontSize = 15.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.End,
@@ -597,9 +586,10 @@ internal fun SettingsInfoRow(label: String, value: String, valueColor: Color? = 
     }
 }
 
-/** 带下拉选择器的设置行：左侧标题 / 说明，右侧当前值 + 箭头。 */
+/** 带下拉档位的设置行：白色浮层贴在行的下沿并右对齐，尺寸紧凑。 */
 @Composable
 private fun <T> WorkStepSelectorRow(
+    icon: ImageVector,
     title: String,
     description: String,
     options: List<T>,
@@ -610,85 +600,169 @@ private fun <T> WorkStepSelectorRow(
     val colorScheme = MaterialTheme.colorScheme
     val selectedLabel = optionLabel(selected)
     var expanded by remember { mutableStateOf(false) }
+    val density = LocalDensity.current
+    val gapPx = remember(density) { with(density) { 6.dp.roundToPx() } }
 
-    Box(modifier = Modifier.fillMaxWidth()) {
+    Box {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable(role = Role.Button) { expanded = true }
                 .semantics { contentDescription = "$title，$selectedLabel" }
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+                .padding(horizontal = 20.dp, vertical = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = colorScheme.onSurface.copy(alpha = 0.62f),
+                modifier = Modifier.size(24.dp),
+            )
+            Spacer(Modifier.width(20.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = title,
                     color = colorScheme.onSurface,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
+                    fontSize = 18.sp,
+                    lineHeight = 24.sp,
+                    fontWeight = FontWeight.SemiBold,
                 )
-                Spacer(Modifier.height(2.dp))
+                Spacer(Modifier.height(4.dp))
                 Text(
                     text = description,
                     color = colorScheme.onSurfaceVariant,
-                    fontSize = 11.sp,
+                    fontSize = 15.sp,
+                    lineHeight = 20.sp,
                 )
             }
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(16.dp))
             Box {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = selectedLabel,
                         color = colorScheme.onSurfaceVariant,
-                        fontSize = 13.sp,
+                        fontSize = 15.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Spacer(Modifier.width(4.dp))
+                    Spacer(Modifier.width(6.dp))
                     Icon(
                         imageVector = MiuixIcons.Regular.ChevronForward,
                         contentDescription = null,
-                        tint = colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                        tint = colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
                         modifier = Modifier
-                            .size(14.dp)
+                            .size(16.dp)
                             .rotate(90f),
                     )
                 }
 
-                DropdownMenu(
-                    expanded = expanded,
-                    onDismissRequest = { expanded = false },
-                    shape = RoundedCornerShape(14.dp),
-                    containerColor = colorScheme.surface,
-                    tonalElevation = 2.dp,
-                    shadowElevation = 8.dp,
-                ) {
-                    options.forEach { option ->
-                        DropdownMenuItem(
-                            text = {
-                                Text(
-                                    text = optionLabel(option),
-                                    fontSize = 14.sp,
-                                )
-                            },
-                            onClick = {
-                                expanded = false
-                                onSelect(option)
-                            },
-                            trailingIcon = {
-                                if (option == selected) {
-                                    Icon(
-                                        imageVector = MiuixIcons.Regular.Ok,
-                                        contentDescription = null,
-                                        tint = colorScheme.primary,
-                                        modifier = Modifier.size(16.dp),
+                if (expanded) {
+                    Popup(
+                        onDismissRequest = { expanded = false },
+                        properties = PopupProperties(focusable = true),
+                        popupPositionProvider = remember(gapPx) {
+                            SettingsRowMenuPositionProvider(gapPx)
+                        },
+                    ) {
+                        Surface(
+                            modifier = Modifier.width(210.dp),
+                            shape = RoundedCornerShape(18.dp),
+                            color = colorScheme.surface,
+                            contentColor = colorScheme.onSurface,
+                            shadowElevation = 14.dp,
+                        ) {
+                            Column(modifier = Modifier.padding(vertical = 6.dp)) {
+                                options.forEach { option ->
+                                    WorkStepPickerRow(
+                                        label = optionLabel(option),
+                                        selected = option == selected,
+                                        onClick = {
+                                            expanded = false
+                                            onSelect(option)
+                                        },
                                     )
                                 }
-                            },
-                        )
+                            }
+                        }
                     }
                 }
             }
+        }
+    }
+}
+
+/** 把档位浮层贴在当前值下方并右对齐；下方空间不足时翻到上方。 */
+private class SettingsRowMenuPositionProvider(private val gapPx: Int) : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset {
+        val maxX = (windowSize.width - popupContentSize.width - gapPx).coerceAtLeast(gapPx)
+        val x = (anchorBounds.right - popupContentSize.width).coerceIn(gapPx, maxX)
+        val below = anchorBounds.bottom + gapPx
+        val y = if (below + popupContentSize.height <= windowSize.height - gapPx) {
+            below
+        } else {
+            (anchorBounds.top - gapPx - popupContentSize.height).coerceAtLeast(gapPx)
+        }
+        return IntOffset(x, y)
+    }
+}
+
+/** 浮层里的一行：选中项染成主题色并带缩放勾选，和 ComposerMenuRow 保持一致。 */
+@Composable
+private fun WorkStepPickerRow(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    val selectedProgress by animateFloatAsState(
+        targetValue = if (selected) 1f else 0f,
+        animationSpec = tween(durationMillis = 180),
+        label = "settingsPickerSelected",
+    )
+    val labelColor by animateColorAsState(
+        targetValue = if (selected) colorScheme.primary else colorScheme.onSurface,
+        animationSpec = tween(durationMillis = 180),
+        label = "settingsPickerLabel",
+    )
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            color = labelColor,
+            fontSize = 15.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(8.dp))
+        Box(
+            modifier = Modifier
+                .size(18.dp)
+                .graphicsLayer {
+                    alpha = selectedProgress
+                    val scale = 0.7f + 0.3f * selectedProgress
+                    scaleX = scale
+                    scaleY = scale
+                },
+        ) {
+            Icon(
+                imageVector = MiuixIcons.Regular.Ok,
+                contentDescription = null,
+                tint = colorScheme.primary,
+                modifier = Modifier.size(18.dp),
+            )
         }
     }
 }
@@ -731,16 +805,7 @@ private fun SettingsRootPage(
         null
     }
 
-    SettingsPageScaffold {
-        Text(
-            text = stringResource(R.string.settings_title),
-            color = colorScheme.onSurface,
-            fontSize = 24.sp,
-            fontWeight = FontWeight.SemiBold,
-            lineHeight = 30.sp,
-            modifier = Modifier.padding(start = 8.dp, top = 2.dp, bottom = 18.dp),
-        )
-
+    SettingsPageScaffold(title = stringResource(R.string.settings_title)) {
         SettingsGroup(title = stringResource(R.string.settings_section_connection)) {
             SettingsNavRow(
                 icon = MiuixIcons.Regular.Link,
@@ -748,7 +813,6 @@ private fun SettingsRootPage(
                 value = connectionSummary,
                 onClick = { onOpenPage(SettingsPage.CONNECTION) },
             )
-            SettingsDivider()
             SettingsNavRow(
                 icon = MiuixIcons.Regular.SearchDevice,
                 title = stringResource(R.string.settings_root_gateway),
@@ -757,7 +821,7 @@ private fun SettingsRootPage(
             )
         }
 
-        Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(32.dp))
 
         SettingsGroup(title = stringResource(R.string.settings_section_app)) {
             SettingsNavRow(
@@ -769,7 +833,7 @@ private fun SettingsRootPage(
             )
         }
 
-        Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(32.dp))
 
         SettingsGroup(title = stringResource(R.string.settings_section_chat)) {
             SettingsNavRow(
@@ -779,8 +843,8 @@ private fun SettingsRootPage(
                 value = stringResource(workStepDisplay.labelRes),
                 onClick = { onOpenPage(SettingsPage.WORK_STEPS) },
             )
-            SettingsDivider()
             WorkStepSelectorRow(
+                icon = MiuixIcons.Regular.Stopwatch,
                 title = stringResource(R.string.work_step_collapse_title),
                 description = stringResource(R.string.work_step_collapse_desc),
                 options = WorkStepCollapseTiming.entries,
@@ -788,8 +852,8 @@ private fun SettingsRootPage(
                 optionLabel = { stringResource(it.labelRes) },
                 onSelect = onWorkStepCollapseTimingChange,
             )
-            SettingsDivider()
             WorkStepSelectorRow(
+                icon = MiuixIcons.Regular.Reply,
                 title = stringResource(R.string.work_step_folded_replies_title),
                 description = stringResource(R.string.work_step_folded_replies_desc),
                 options = WorkStepFoldedReplies.entries,
@@ -799,7 +863,7 @@ private fun SettingsRootPage(
             )
         }
 
-        Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(32.dp))
 
         SettingsGroup(title = stringResource(R.string.settings_section_about)) {
             SettingsNavRow(
@@ -830,6 +894,7 @@ private fun SettingsScreenPreview() {
             notificationsEnabled = true,
             notifyApprovals = true,
             notifyQuestions = true,
+            notifyCompletion = true,
             notificationPermissionGranted = true,
             workStepDisplay = WorkStepDisplay.DEFAULT,
             workStepCollapseTiming = WorkStepCollapseTiming.DEFAULT,
@@ -845,6 +910,7 @@ private fun SettingsScreenPreview() {
             onNotificationsChange = {},
             onApprovalsChange = {},
             onQuestionsChange = {},
+            onCompletionChange = {},
             onWorkStepDisplayChange = {},
             onWorkStepCollapseTimingChange = {},
             onWorkStepFoldedRepliesChange = {},

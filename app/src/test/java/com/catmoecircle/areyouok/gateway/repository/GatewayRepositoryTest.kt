@@ -204,6 +204,135 @@ class GatewayRepositoryTest {
     }
 
     @Test
+    fun `running session emits one completion when it goes idle`() = runTest {
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "会话一"))
+        }
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope)
+        val completions = mutableListOf<SessionCompletion>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            repository.sessionCompletions.collect { completions += it }
+        }
+        repository.connect(endpoint)
+        advanceUntilIdle()
+
+        transport.emitEvent(
+            seq = 1,
+            kind = "session.status",
+            data = buildJsonObject {
+                put("sessionId", "s1")
+                put("running", true)
+            },
+        )
+        advanceUntilIdle()
+
+        // turn.end 与 session.status 可能同时到：完成事件只能发一次。
+        transport.emitEvent(seq = 2, kind = "turn.end", data = buildJsonObject { put("sessionId", "s1") })
+        transport.emitEvent(
+            seq = 3,
+            kind = "session.status",
+            data = buildJsonObject {
+                put("sessionId", "s1")
+                put("running", false)
+            },
+        )
+        advanceUntilIdle()
+
+        assertEquals(listOf("s1"), completions.map { it.sessionId })
+        assertEquals("会话一", completions.single().title)
+        testScope.cancel()
+    }
+
+    @Test
+    fun `idle session going idle again does not emit a completion`() = runTest {
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "会话一", running = false))
+        }
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope)
+        val completions = mutableListOf<SessionCompletion>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            repository.sessionCompletions.collect { completions += it }
+        }
+        repository.connect(endpoint)
+        advanceUntilIdle()
+
+        // App 启动/重连时已经是空闲的会话：不能补发「任务完成」。
+        transport.emitEvent(
+            seq = 1,
+            kind = "session.status",
+            data = buildJsonObject {
+                put("sessionId", "s1")
+                put("running", false)
+            },
+        )
+        advanceUntilIdle()
+
+        assertTrue(completions.isEmpty())
+        testScope.cancel()
+    }
+
+    @Test
+    fun `replayed status events do not emit stale completions`() = runTest {
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "会话一"))
+        }
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope)
+        val completions = mutableListOf<SessionCompletion>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            repository.sessionCompletions.collect { completions += it }
+        }
+        repository.connect(endpoint)
+        advanceUntilIdle()
+
+        // 连上时 ready.seq = 100：之后补发的 90/91 是历史，不应弹「任务完成」。
+        transport.emit(StreamUpdate.Ready(ReadyFrame(seq = 100)))
+        advanceUntilIdle()
+        transport.emitEvent(
+            seq = 90,
+            kind = "session.status",
+            data = buildJsonObject {
+                put("sessionId", "s1")
+                put("running", true)
+            },
+        )
+        transport.emitEvent(
+            seq = 91,
+            kind = "session.status",
+            data = buildJsonObject {
+                put("sessionId", "s1")
+                put("running", false)
+            },
+        )
+        advanceUntilIdle()
+        assertTrue(completions.isEmpty())
+
+        // 实时事件（seq > 100）照常提醒。
+        transport.emitEvent(
+            seq = 101,
+            kind = "session.status",
+            data = buildJsonObject {
+                put("sessionId", "s1")
+                put("running", true)
+            },
+        )
+        transport.emitEvent(
+            seq = 102,
+            kind = "session.status",
+            data = buildJsonObject {
+                put("sessionId", "s1")
+                put("running", false)
+            },
+        )
+        advanceUntilIdle()
+
+        assertEquals(listOf("s1"), completions.map { it.sessionId })
+        testScope.cancel()
+    }
+
+    @Test
     fun `approval event adds pending and answer removes it`() = runTest {
         val transport = FakeTransport().apply {
             fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "T"))
