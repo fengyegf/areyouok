@@ -14,7 +14,7 @@ dsh-gateway 插件（跑在 DSH 进程里）
    · 自建监听：LAN 7788(HTTP) / 公网 7789(HTTPS)
    · /v1 REST + /v1/stream WS，事件 ring/seq/补发，审批跨断线
    · mDNS 广播 _dshgw._tcp
-   · 配置页（lib/client.js）→ 插件 → 已安装插件 → dsh-gateway
+   · 配置页（lib/client.js）→ 设置面板 → DSH 网关
    · 配置页后端（lib/panel-routes.js）→ 宿主 webServer: /plugins/dsh-gateway/*
    ▲
 APK
@@ -58,7 +58,7 @@ pnpm install
 
 3. **完全退出并重启 DeepSeek Harness**（插件随进程加载；当前会话会结束）。
 
-> 验证：DSH 日志出现 `[dsh-gateway] listening lan=7788 public=7789`；侧边栏「插件 → 已安装插件 → dsh-gateway」能打开配置页并看到运行状态；`curl http://127.0.0.1:7788/v1/health` 返回 `{"ok":true,...}`。
+> 验证：DSH 日志出现 `[dsh-gateway] listening lan=7788 public=7789`；侧边栏底部「设置」→ 左侧「DSH 网关」能打开配置页并看到运行状态；`curl http://127.0.0.1:7788/v1/health` 返回 `{"ok":true,...}`。
 
 ### 卸载
 
@@ -126,27 +126,36 @@ WS   /v1/stream                         长连接（hello/sub/ack/ping）
 - **局域网连接走明文 HTTP（7788），不需要证书**：mDNS 发现、配置页二维码、`dshgw://pair?lan=http://…` 都优先给局域网 HTTP 地址；APK 在同一网段时不会触碰 TLS，也不需要配对码（`lanRequirePairing=true` 时仍可在 LAN 上走 HTTP 配对换令牌）。公网 HTTPS 只在局域网不可达时使用。
 - 网关的两个监听**不再提供任何管理页面或管理接口**：`/admin` 及其 `/admin/api/*` 已删除，只剩 `/v1`。
 
-## 配置页（内置在插件列表里）
+## 配置页（内置在设置面板里）
 
-不再是独立网页。管理界面现在是插件自带的配置页，位置：
+不再是独立网页。管理界面现在是 DSH **设置面板**里的一页，位置：
 
-**侧边栏 → 插件 → 已安装插件 → dsh-gateway → 「配置」**（包页面上该行的齿轮/箭头，或直接点该行）
+**侧边栏底部 → 设置 → 左侧导航「DSH 网关」**
 
-页面内容（折叠卡片 + 分区标签，形态与 `dsh-connect-workbuddy` 的设置卡一致）：
+（`settings.section` 槽，带 `settings.section.icon` 导航图标；同一份实现也注册到插件的行配置页 `plugins.row.config`，所以「插件 → 已安装插件 → dsh-gateway」照样能打开，两个入口看到的是同一个页面。）
 
-- 卡片头：插件图标、标题、一句话说明、右侧展开箭头（真 `<button aria-expanded>`，可键盘操作）
+页面内容（一页纵向排列，不分标签）：
+
 - **运行状态**：DSH 连接、局域网 HTTP / 公网 HTTPS 端口、mDNS、已配对设备数、已运行时长
 - **扫码配对**：生成一次性 `dshgw://pair?…` 配对码，页内直接画出二维码（**优先局域网 HTTP 地址** + 公网 HTTPS 回退 + 一次性 code + 证书指纹 + 主机名，10 分钟有效）
 - **已配对设备**：名称、设备 ID、最近来源、最近活跃、撤销
 - **开关**：`lanRequirePairing`、`mdns`（内存生效；`mdns` 需重启）
 
-四个分区是同一个页面的 tab，非活动分区保持挂载（`hidden`），所以来回切换不会重新拉取、刚生成的配对码也还在。卡片收起时不轮询；`plugins.bundle.config`（包页面）与 `plugins.row.config`（行配置页）都注册这张卡，两个入口看到的是同一份实现。
+四个分区在同一屏里从上到下排开，中间用一条分隔线断开，没有标签栏——内容本来就短，藏起来反而多一层要点的东西。
+
+三种渲染面（同一个 `lib/client.js` 组件）：
+
+| 面 | 槽位 | 表现 |
+|---|---|---|
+| 设置面板 | `settings.section`（`surface: 'settings'`） | 只有页面主体：标题/关闭/滚动都由设置面板提供，不再套卡片头和折叠 |
+| 插件行配置页 | `plugins.row.config` | 折叠卡片（图标 + 标题 + 说明 + 展开箭头），默认展开 |
+| 行摘要 | `plugins.row.config` 的 `view: 'summary'` | 只有一句话 |
 
 实现分两半：
 
 | 文件 | 运行位置 | 作用 |
 |---|---|---|
-| `lib/client.js` | 浏览器（`dsh.client`，`plugins.bundle.config` + `plugins.row.config` 槽） | 页面本身：折叠卡片、分区标签、状态卡片、二维码 SVG、设备表、开关；只用 `--dsw-alias-*` 主题令牌与 `ctx.locale` 文案 |
+| `lib/client.js` | 浏览器（`dsh.client`，`settings.section` + `plugins.row.config` 槽） | 页面本身：状态卡片、二维码 SVG、设备表、开关；只用 `--dsw-alias-*` 主题令牌与 `ctx.locale` 文案 |
 | `lib/panel-routes.js` | Host（`ctx.webServer.register`） | 页面调用的 JSON 接口，挂在宿主服务器上，复用宿主的浏览器登录与 Host/Origin 栅栏 |
 | `lib/panel.js` | Host | 纯数据：地址枚举、`dshgw://` 深链、二维码矩阵、状态快照 |
 
@@ -204,6 +213,7 @@ node tools/install-gateway.mjs --remove --apply  # 卸载
 | mDNS 发现不到 | 路由器多播/AP 隔离；用 APK 手输地址兜底 |
 | 手机扫码打不开公网 | 检查 IPv6 前缀/防火墙放行 7789；配置页显示的公网地址是否可达 |
 | 插件页一直「正在读取…」 | 宿主 `webServer` 未注册到 `/plugins/dsh-gateway/*`：看日志有无 `in-app plugin panel did not mount`；旧版 DSH 缺少 `ctx.webServer.register` 时配置页无后端 |
+| 设置面板里没有「DSH 网关」 | 宿主未声明 `settings.section` 槽（旧版 DSH）；插件仍可从「插件 → 已安装插件」的行配置页进入 |
 | 插件页 403 | 宿主 `connection.requestRejection` 拒绝了请求（Host/Origin 不被信任，或浏览器会话未登录）；同源打开 Web UI 再试 |
 
 ## 兼容性

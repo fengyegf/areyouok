@@ -181,6 +181,9 @@ const STATE_FIXTURE = {
   serverTime: Date.now(),
 };
 
+/** The same snapshot before any pairing code exists (the empty state). */
+const STATE_NO_PAIRING = Object.assign({}, STATE_FIXTURE, { pairing: null });
+
 /** Replace `fetch` for one test and record what the page asked for. */
 function withFetch(handler) {
   const calls = [];
@@ -288,16 +291,24 @@ describe('panel client bundle', () => {
     assert.deepEqual(module.inject, ['slots', 'locale'])
   })
 
-  it('registers the configuration page under both spellings of its name', () => {
+  it('registers a Settings page plus its nav glyph and the plugin row page', () => {
     const { module, ctx, registrations, yielded, dictionaries, effects, injects } = loadClient()
     module.apply(ctx)
-    // Both seats: the package page's own section and the row's configure page.
-    assert.deepEqual(injects, ['plugins.bundle.config', 'plugins.row.config'])
-    const bundleKeys = registrations
-      .filter((entry) => entry.options.name === 'plugins.bundle.config')
-      .map((entry) => entry.options.key)
-      .sort()
-    assert.deepEqual(bundleKeys, ['dsh-gateway', 'include:dsh-gateway'])
+    // The Settings dialog is the destination; the plugin row keeps its page.
+    assert.deepEqual(injects, ['settings.section', 'plugins.row.config'])
+    const section = registrations.filter((entry) => entry.options.name === 'settings.section')
+    assert.equal(section.length, 1)
+    assert.equal(section[0].options.id, 'dsh-gateway')
+    assert.equal(section[0].options.order, 35)
+    // `label` is a thunk so the nav row follows a locale change without
+    // re-registering; the shell re-reads it on every projection.
+    assert.equal(typeof section[0].options.label, 'function')
+    assert.equal(typeof section[0].options.label(), 'string')
+    const icon = registrations.filter((entry) => entry.options.name === 'settings.section.icon')
+    assert.equal(icon.length, 1)
+    // The shell renders the glyph with `{ only: row.id }`, so the two ids must
+    // match or the nav row ships with an empty cell.
+    assert.equal(icon[0].options.id, section[0].options.id)
     const rowKeys = registrations
       .filter((entry) => entry.options.name === 'plugins.row.config')
       .map((entry) => entry.options.key)
@@ -306,7 +317,6 @@ describe('panel client bundle', () => {
     assert.equal(registrations.length, 4)
     for (const entry of registrations) {
       assert.equal(entry.options.locale, 'dshGateway')
-      assert.equal(entry.options.priority, 30)
       assert.equal(typeof entry.component, 'function')
     }
     // `function*` injection: the disposer is yielded, one per registration.
@@ -391,7 +401,7 @@ describe('panel client bundle', () => {
     }
   })
 
-  it('renders the snapshot as a collapsible card with one tab per job', async () => {
+  it('renders the snapshot as a collapsible card holding every section', async () => {
     const { module, ctx, registrations, React } = loadClient()
     module.apply(ctx)
     const component = registrations[0].component
@@ -406,18 +416,76 @@ describe('panel client bundle', () => {
       const header = findAll(tree, 'button').filter((button) => button.props['aria-expanded'] !== undefined)[0]
       assert.ok(header !== undefined, 'the card header should be a button with aria-expanded')
       assert.equal(header.props['aria-expanded'], true)
-      // Every job has a tab; only the active one is visible, the rest stay
-      // mounted behind `hidden` so switching back does not refetch.
-      const tabs = findAll(tree, 'div').filter((div) => div.props.role === 'tablist')
-      assert.equal(tabs.length, 1)
-      const tabButtons = findAll(tabs[0], 'button')
-      assert.deepEqual(tabButtons.map((button) => textOf(button)), ['tab.status', 'tab.pairing', 'tab.devices1', 'tab.config'])
-      assert.equal(tabButtons[0].props['aria-selected'], true)
-      const panels = findAll(tree, 'div').filter((div) => div.props.role === 'tabpanel')
-      assert.equal(panels.length, 4)
-      assert.deepEqual(panels.map((entry) => entry.props.hidden), [false, true, true, true])
+      // One scroll, four sections, nothing hidden behind a tab strip.
+      assert.equal(findAll(tree, 'div').filter((div) => div.props.role === 'tablist').length, 0)
+      assert.equal(findAll(tree, 'div').filter((div) => div.props.role === 'tabpanel').length, 0)
+      const headings = findAll(tree, 'h4').map((heading) => textOf(heading))
+      assert.deepEqual(headings, ['section.status', 'section.pairing', 'section.devices1', 'section.config'])
+      // Every section's content is present at once: the device row and the
+      // switches are on screen without a click.
+      assert.match(textOf(tree), /Pixel/)
+      const switches = findAll(tree, 'input').filter((input) => input.props.type === 'checkbox')
+      assert.equal(switches.length, 2)
       // The icon is inline SVG: an <img> would be at the mercy of `img-src`.
       assert.equal(findAll(tree, 'img').length, 0)
+    } finally {
+      fetchStub.restore()
+      React.__dispose()
+    }
+  })
+
+  it('marks the QR area before a code exists, on the theme surface', async () => {
+    const { module, ctx, registrations, React } = loadClient()
+    module.apply(ctx)
+    const component = registrations[0].component
+    const fetchStub = withFetch((url) => {
+      if (url === '/plugins/dsh-gateway/state') return jsonResponse(STATE_NO_PAIRING)
+      return jsonResponse({ ok: false, error: { code: 'not_found', message: 'no route' } }, 404)
+    })
+    try {
+      React.__reset()
+      const tree = await React.__render(component, { surface: 'settings', t: (key) => key })
+      // The empty slot keeps the 180px footprint so generating a code does not
+      // shift the layout, and it is marked `-qrEmpty` so the stylesheet can
+      // paint the panel surface + dashed edge instead of the QR's white plate
+      // (a white square on the light theme is invisible — the reported bug).
+      const slot = findAll(tree, 'div').filter((div) => String(div.props.className).includes('-qrEmpty'))[0]
+      assert.ok(slot !== undefined, 'the empty QR area needs its own marker class')
+      assert.equal(String(slot.props.className).includes('-qr '), true, 'the slot keeps the -qr footprint class')
+      // It says what goes there, and the label is localized rather than a bare box.
+      assert.match(textOf(slot), /pairing\.placeholder/)
+      // A decorative ghost only: nothing that could be mistaken for a real code.
+      assert.equal(findAll(slot, 'svg').length, 1)
+      assert.equal(slot.props.role, 'img')
+      assert.equal(slot.props['aria-label'], 'pairing.placeholder')
+      // No matrix runs, because there is no code.
+      assert.equal(findAll(slot, 'rect').length > 0, true, 'the ghost is drawn from rects')
+    } finally {
+      fetchStub.restore()
+      React.__dispose()
+    }
+  })
+
+  it('renders the Settings surface without a card header, all sections inline', async () => {
+    const { module, ctx, registrations, React } = loadClient()
+    module.apply(ctx)
+    const component = registrations[0].component
+    const fetchStub = withFetch((url) => {
+      if (url === '/plugins/dsh-gateway/state') return jsonResponse(STATE_FIXTURE)
+      return jsonResponse({ ok: false, error: { code: 'not_found', message: 'no route' } }, 404)
+    })
+    try {
+      React.__reset()
+      const tree = await React.__render(component, { surface: 'settings', t: (key) => key })
+      // The shell draws the dialog title and close control, so this page must
+      // not repeat them: no card header button, and therefore no aria-expanded.
+      assert.equal(findAll(tree, 'button').filter((b) => b.props['aria-expanded'] !== undefined).length, 0)
+      // The body is up immediately — the reader opened Settings on purpose.
+      assert.match(textOf(tree), /status\.dsh/)
+      // Same single scroll: no tab strip here either.
+      assert.equal(findAll(tree, 'div').filter((div) => div.props.role === 'tablist').length, 0)
+      const headings = findAll(tree, 'h4').map((heading) => textOf(heading))
+      assert.deepEqual(headings, ['section.status', 'section.pairing', 'section.devices1', 'section.config'])
     } finally {
       fetchStub.restore()
       React.__dispose()
