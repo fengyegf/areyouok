@@ -42,10 +42,10 @@ window.__ModuleLoader__.load({
       'meta.description': '把本机 DSH 的会话与消息转发给手机，支持扫码配对、设备管理与局域网/公网开关。',
       'card.expand': '展开 {title}',
       'card.collapse': '收起 {title}',
-      'tab.status': '运行状态',
-      'tab.pairing': '扫码配对',
-      'tab.devices': '已配对设备',
-      'tab.config': '开关',
+      'section.status': '运行状态',
+      'section.pairing': '扫码配对',
+      'section.devices': '已配对设备',
+      'section.config': '开关',
       'status.dsh': 'DSH 连接',
       'status.lan': '局域网 HTTP',
       'status.public': '公网 HTTPS',
@@ -61,6 +61,7 @@ window.__ModuleLoader__.load({
       'pairing.create': '生成配对二维码',
       'pairing.renew': '重新生成',
       'pairing.empty': '尚未生成配对码。点击上方按钮创建一次性码（10 分钟有效）。',
+      'pairing.placeholder': '二维码将显示在这里',
       'pairing.code': '配对码',
       'pairing.expires': '有效期至',
       'pairing.lan': '局域网（HTTP，免证书）',
@@ -98,11 +99,10 @@ window.__ModuleLoader__.load({
       'meta.description': 'Forwards this machine\'s DSH sessions to a phone, with QR pairing, device management and LAN/public switches.',
       'card.expand': 'Expand {title}',
       'card.collapse': 'Collapse {title}',
-      'tab.status': 'Status',
-      'tab.pairing': 'Pairing',
-      'tab.devices': 'Devices',
-      'tab.config': 'Switches',
-      'status.title': 'Status',
+      'section.status': 'Status',
+      'section.pairing': 'Pairing',
+      'section.devices': 'Devices',
+      'section.config': 'Switches',
       'status.dsh': 'DSH link',
       'status.lan': 'LAN HTTP',
       'status.public': 'Public HTTPS',
@@ -118,6 +118,7 @@ window.__ModuleLoader__.load({
       'pairing.create': 'Generate pairing code',
       'pairing.renew': 'Generate again',
       'pairing.empty': 'No pairing code yet. Generate a one-shot code that stays valid for 10 minutes.',
+      'pairing.placeholder': 'The QR code will appear here',
       'pairing.code': 'Code',
       'pairing.expires': 'Valid until',
       'pairing.lan': 'LAN (plain HTTP, no certificate)',
@@ -154,20 +155,17 @@ window.__ModuleLoader__.load({
 
     const CSS = [
       /* ---------------------------------------------------------------- card
-       * The settings page is a COLLAPSED CARD, not a wall of sections.
+       * The plugin row's page is a CARD with a collapsible body.
        *
        * The row's configure control opens a detail page whose body is this
        * card; that page already carries the plugin's title, icon and one-liner
-       * in its own header. A card that repeated them would push the first
-       * control two screens down — the shape `dsh-connect-workbuddy` settled on
-       * for the same reason, and the one a reader already knows from the app's
-       * plugin list.
+       * in its own header. The card header repeats them so the body can be
+       * folded away — the shape `dsh-connect-workbuddy` settled on for the same
+       * seat. The header is a real button with `aria-expanded`, so the card is
+       * keyboard-operable and announces its state.
        *
-       * Closed by default in BOTH views: in the row's `summary` seat only the
-       * header line is on screen anyway, and in the `page` seat the host's
-       * detail header has just said what the card would say again. The header is
-       * a real button with `aria-expanded`, so the card is keyboard-operable and
-       * announces its state. */
+       * The Settings surface does not use this card at all: it renders the
+       * sections directly (see the `-page` rule below). */
       '.' + CLS + '-card{border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg,10px);',
       'background:var(--dsw-alias-bg-layer-1);list-style:none;transition:border-color .16s,background .16s}',
       '.' + CLS + '-card:hover{border-color:var(--dsw-alias-label-tertiary)}',
@@ -190,26 +188,25 @@ window.__ModuleLoader__.load({
       'border-right:1.6px solid currentColor;border-bottom:1.6px solid currentColor;transform:rotate(45deg)}',
       '.' + CLS + '-chevronOpen{transform:rotate(180deg)}',
       '.' + CLS + '-cardBody{border-top:0.5px solid var(--dsw-alias-border-l2);margin:0 16px;padding:0 0 12px}',
-      /* ---------------------------------------------------------------- tabs
-       * The card's four jobs, split into panels of ONE document.
+      /* ------------------------------------------------------------- sections
+       * The page's four jobs, stacked in one scroll.
        *
-       * They serve different moments — watch the link, hand a phone the code,
-       * prune a device, flip a switch — and a single column put the pairing
-       * button under four status cards and the switches two screens further
-       * down. Only the ACTIVE panel is visible; the others stay MOUNTED behind
-       * `hidden`, so switching back does not refetch and a half-finished
-       * pairing code is still there. */
-      '.' + CLS + '-tabs{display:flex;align-items:stretch;gap:2px;margin:16px 0 0;',
-      'border-bottom:0.5px solid var(--dsw-alias-border-l2)}',
-      '.' + CLS + '-tab{appearance:none;font:inherit;cursor:pointer;border:0;background:transparent;padding:7px 11px;',
-      'margin-bottom:-1px;border-bottom:2px solid transparent;color:var(--dsw-alias-label-tertiary);font-size:13px;',
-      'font-weight:600;line-height:20px;white-space:nowrap;transition:color .15s,border-color .15s}',
-      '.' + CLS + '-tab:hover:not(.' + CLS + '-tabActive){color:var(--dsw-alias-label-primary)}',
-      '.' + CLS + '-tab:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-alias-brand-primary);',
-      'outline-offset:1px}',
-      '.' + CLS + '-tabActive{color:var(--dsw-alias-label-primary);border-bottom-color:var(--dsw-alias-brand-primary)}',
-      '.' + CLS + '-tabCount{color:var(--dsw-alias-label-tertiary);font-weight:400;margin-left:6px}',
-      '.' + CLS + '-panel{margin-top:12px;display:flex;flex-direction:column;gap:12px}',
+       * There was a tab bar here. It cost more than it saved on a page this
+       * short: three quarters of the content was hidden at any moment, the
+       * pairing button sat behind a click, and the only hint that a device list
+       * existed was a count inside a tab label. A single column shows all four
+       * with no navigation to learn; the section headings keep it scannable, and
+       * the rule above each one (except the first) is what separates them now
+       * that no tab underline does. */
+      '.' + CLS + '-sections{display:flex;flex-direction:column;gap:20px}',
+      '.' + CLS + '-section{display:flex;flex-direction:column;gap:12px;min-width:0}',
+      '.' + CLS + '-section+' + '.' + CLS + '-section{padding-top:20px;',
+      'border-top:0.5px solid var(--dsw-alias-border-l2)}',
+      '.' + CLS + '-sectionTitle{margin:0;font-size:13px;font-weight:600;line-height:20px;',
+      'color:var(--dsw-alias-label-primary);display:flex;align-items:baseline;gap:6px}',
+      '.' + CLS + '-sectionCount{font-weight:400;font-size:12px;line-height:18px;',
+      'color:var(--dsw-alias-label-tertiary)}',
+      '.' + CLS + '-panel{display:flex;flex-direction:column;gap:12px;min-width:0}',
       '.' + CLS + '-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}',
       '.' + CLS + '-card{border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg,10px);',
       'background:var(--dsw-alias-bg-layer-1);padding:10px 12px;display:flex;flex-direction:column;gap:2px}',
@@ -223,6 +220,16 @@ window.__ModuleLoader__.load({
       '.' + CLS + '-qr{flex:none;background:#fff;border-radius:var(--dsw-radius-lg,10px);padding:8px;',
       'box-sizing:border-box;width:180px;height:180px;display:flex;align-items:center;justify-content:center}',
       '.' + CLS + '-qr svg{display:block;width:100%;height:100%}',
+      /* The empty state. Same 180px footprint as a real code so generating one
+       * does not shift the page, but painted on the panel's own surface with a
+       * dashed edge instead of the QR's white plate — a white square is
+       * invisible on the light theme, which is exactly the bug this fixes. */
+      '.' + CLS + '-qrEmpty{flex-direction:column;gap:6px;background:var(--dsw-alias-bg-layer-2);',
+      'border:1px dashed var(--dsw-alias-border-l2);color:var(--dsw-alias-label-tertiary);padding:12px;',
+      'text-align:center}',
+      '.' + CLS + '-qrGhost{width:64px;height:64px;flex:none;opacity:.55}',
+      '.' + CLS + '-qrHint{font-size:12px;line-height:16px;color:var(--dsw-alias-label-tertiary);',
+      'overflow-wrap:anywhere}',
       '.' + CLS + '-rows{display:flex;flex-direction:column;gap:0;margin:0;padding:0;list-style:none}',
       '.' + CLS + '-row{display:flex;flex-direction:column;gap:2px;padding:8px 0;',
       'border-bottom:0.5px solid var(--dsw-alias-border-l2)}',
@@ -254,6 +261,22 @@ window.__ModuleLoader__.load({
       'color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}',
       '.' + CLS + '-status{margin:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}',
       '.' + CLS + '-statusError{margin:0;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px}',
+      /* The Settings-dialog surface.
+       *
+       * The shell hands a section a scrollable content column and draws the
+       * dialog title itself, so this page supplies only its own body — no card
+       * border, no header, no collapse — and starts with the first section
+       * heading.
+       *
+       * `min-width:0` matters here: the column is a flex child, and a long
+       * device id or `dshgw://` string would otherwise stretch it past the
+       * dialog instead of wrapping. */
+      '.' + CLS + '-page{display:flex;flex-direction:column;gap:12px;min-width:0;',
+      'color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}',
+      /* The nav glyph the shell renders through `settings.section.icon`. It is
+       * an inline <svg>, so it inherits the nav row's currentColor for its
+       * frame and only needs the size and radius the shell's other icons use. */
+      '.' + CLS + '-navIcon{display:block;border-radius:4px;flex:none}',
     ].join('');
 
     /** Insert (or refresh) the page stylesheet. */
@@ -298,8 +321,16 @@ window.__ModuleLoader__.load({
      * The matrix arrives base64 encoded from the Host — one byte per module
      * (`1` dark, `0` light) in row-major order — so no QR library reaches the
      * browser and no CSP `img-src` rule can blank the code.
+     *
+     * With no code yet it still renders a box of the SAME size. That empty
+     * state used to be a bare white `<div>`: on the light theme a white square
+     * on a white panel is invisible, so nothing told the reader where the code
+     * would appear or that the area was theirs to fill. The placeholder keeps
+     * the footprint (so generating a code does not shift the layout under the
+     * cursor) and wears a dashed edge on the panel's own surface, which reads as
+     * an empty slot in both themes.
      */
-    function QrCode({ qr, label }) {
+    function QrCode({ qr, label, placeholder }) {
       const matrix = React.useMemo(() => {
         if (qr === null || qr === undefined) return { size: 0, runs: [] };
         const size = Number(qr.size);
@@ -329,7 +360,28 @@ window.__ModuleLoader__.load({
       }, [qr]);
 
       if (matrix.size === 0) {
-        return h('div', { className: CLS + '-qr', role: 'img', 'aria-label': label });
+        return h('div', {
+          className: CLS + '-qr ' + CLS + '-qrEmpty',
+          role: 'img',
+          'aria-label': placeholder === undefined ? label : placeholder,
+        },
+        /* A faint QR-ish glyph: three finder squares and a few dots. Decorative
+         * only — it says "a code goes here" without pretending to be scannable,
+         * and it is drawn on the theme's own colours so it reads in both. */
+        h('svg', {
+          viewBox: '0 0 32 32',
+          'aria-hidden': 'true',
+          focusable: 'false',
+          className: CLS + '-qrGhost',
+        },
+        h('rect', { x: 2, y: 2, width: 8, height: 8, rx: 1, fill: 'none', stroke: 'currentColor', strokeWidth: 1.6 }),
+        h('rect', { x: 22, y: 2, width: 8, height: 8, rx: 1, fill: 'none', stroke: 'currentColor', strokeWidth: 1.6 }),
+        h('rect', { x: 2, y: 22, width: 8, height: 8, rx: 1, fill: 'none', stroke: 'currentColor', strokeWidth: 1.6 }),
+        h('rect', { x: 13, y: 13, width: 3, height: 3, fill: 'currentColor' }),
+        h('rect', { x: 19, y: 13, width: 3, height: 3, fill: 'currentColor' }),
+        h('rect', { x: 13, y: 19, width: 3, height: 3, fill: 'currentColor' }),
+        h('rect', { x: 22, y: 22, width: 8, height: 8, rx: 1, fill: 'none', stroke: 'currentColor', strokeWidth: 1.6 })),
+        h('span', { className: CLS + '-qrHint' }, placeholder === undefined ? label : placeholder));
       }
       return h('div', { className: CLS + '-qr', role: 'img', 'aria-label': label },
         h('svg', {
@@ -397,10 +449,12 @@ window.__ModuleLoader__.load({
      * plugin's resource route would blank the artwork out of the header. The
      * shapes are the ones `icon.svg` ships, so the two stay one mark.
      */
-    function GatewayIcon({ className }) {
+    function GatewayIcon({ className, size }) {
       return h('svg', {
         className,
         viewBox: '0 0 32 32',
+        width: size ?? 32,
+        height: size ?? 32,
         role: 'img',
         'aria-hidden': 'true',
         focusable: 'false',
@@ -417,20 +471,31 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The gateway page.
-     * @param {{view: 'summary'|'page', t: Function}} props - slot props.
+     * The gateway settings page.
+     *
+     * Three surfaces ask this one component for its content, and they differ
+     * only in what the host already drew around it:
+     *
+     *   - `surface: 'settings'` — a page of the Settings dialog (`settings.section`).
+     *     The shell owns the dialog chrome (title, close, scroll container), so
+     *     the page contributes no header and no collapse: the reader already
+     *     arrived here on purpose.
+     *   - the plugin row's page (`plugins.row.config`, `view: 'page'`) — a card
+     *     with its own header, open by default.
+     *   - the row's one-liner (`view: 'summary'`) — just the sentence.
+     *
+     * @param {{view?: 'summary'|'page', surface?: string, t: Function}} props - slot props.
      */
     function GatewayPanel(props) {
       const t = props.t;
-      const page = props.view !== 'summary';
+      const settingsSurface = props.surface === 'settings';
+      const page = settingsSurface || props.view !== 'summary';
       /* Collapsed card, open body — the shape the app's own plugin list uses.
-       * In the `page` seat it starts OPEN: the host's detail header has just
-       * said what the card header repeats, so requiring a click there would add
-       * a step to reach the only content on the page. */
+       * Both full-page seats start OPEN: a Settings page has no card header to
+       * click (the shell's own title sits above it) and the plugin row's page
+       * has just been opened on purpose, so an extra click would only bury the
+       * content behind a control that repeats what the reader already knows. */
       const [open, setOpen] = React.useState(page);
-      /* Which of the card's four jobs is on screen. See the CSS block: one
-       * panel at a time, the rest stay mounted behind `hidden`. */
-      const [panel, setPanel] = React.useState('status');
       const [state, setState] = React.useState(null);
       const [error, setError] = React.useState('');
       const [busy, setBusy] = React.useState('');
@@ -582,13 +647,6 @@ window.__ModuleLoader__.load({
             : h('span', { className: CLS + '-mono' }, state.fingerprintPretty)],
         ];
 
-        const tabs = [
-          ['status', t('tab.status')],
-          ['pairing', t('tab.pairing')],
-          ['devices', t('tab.devices'), String(devices.length)],
-          ['config', t('tab.config')],
-        ];
-
         const statusPanel = h('div', { className: CLS + '-panel' },
           h('div', { className: CLS + '-grid' },
             Card(t('status.dsh'), dsh.connected === true ? t('status.on') : t('status.off'),
@@ -628,6 +686,7 @@ window.__ModuleLoader__.load({
             h(QrCode, {
               qr: pairing === null ? null : pairing.qr,
               label: pairing === null ? t('pairing.empty') : t('pairing.code'),
+              placeholder: t('pairing.placeholder'),
             }),
             pairingActions),
           h('p', { className: CLS + '-hint' }, t('pairing.note')));
@@ -677,31 +736,42 @@ window.__ModuleLoader__.load({
               h('span', { className: CLS + '-hint' }, 'mdns · ' + t('switches.restart')))),
           h('p', { className: CLS + '-warn' }, t('footnote')));
 
-        const panels = { status: statusPanel, pairing: pairingPanel, devices: devicesPanel, config: configPanel };
-
-        return h('div', null,
-          h('div', { className: CLS + '-tabs', role: 'tablist', 'aria-label': title },
-            tabs.map(([id, label, count]) => h('button', {
-              key: id,
-              type: 'button',
-              role: 'tab',
-              'aria-selected': panel === id,
-              className: CLS + '-tab' + (panel === id ? ' ' + CLS + '-tabActive' : ''),
-              onClick: () => setPanel(id),
-            }, label, count === undefined ? null : h('span', { className: CLS + '-tabCount' }, count)))),
-          /* One panel at a time, the rest mounted behind `hidden`: switching
-           * back does not refetch, and the pairing code is still on screen. */
-          tabs.map(([id]) => h('div', {
-            key: id,
-            role: 'tabpanel',
-            hidden: panel !== id,
-            className: CLS + '-panelWrap',
-          }, panels[id])),
+        /* Every section, top to bottom, in one scroll.
+         *
+         * There used to be a tab bar here. Four tabs for a page this short cost
+         * more than they saved: three of the four were hidden at any moment, the
+         * pairing button sat behind a click, and the device count in a tab label
+         * was the only thing telling a reader that a list existed at all. A
+         * single column shows the same content with no navigation to learn, and
+         * the section headings keep it scannable. */
+        return h('div', { className: CLS + '-sections' },
+          h('section', { className: CLS + '-section' },
+            h('h4', { className: CLS + '-sectionTitle' }, t('section.status')),
+            statusPanel),
+          h('section', { className: CLS + '-section' },
+            h('h4', { className: CLS + '-sectionTitle' }, t('section.pairing')),
+            pairingPanel),
+          h('section', { className: CLS + '-section' },
+            h('h4', { className: CLS + '-sectionTitle' },
+              t('section.devices'),
+              h('span', { className: CLS + '-sectionCount' }, String(devices.length))),
+            devicesPanel),
+          h('section', { className: CLS + '-section' },
+            h('h4', { className: CLS + '-sectionTitle' }, t('section.config')),
+            configPanel),
           notice === '' ? null : h('p', { className: CLS + '-status', role: 'status' }, notice),
           /* A failed poll keeps the last good snapshot on screen and says so
            * once, instead of replacing everything with an error page. */
           error === '' ? null : h('p', { className: CLS + '-statusError', role: 'alert' }, error));
       };
+
+      /* The Settings dialog already supplies a page title, a close control and
+       * the scroll container; a card header here would repeat the title and
+       * draw a second frame inside the shell's own. So that surface renders the
+       * body alone. */
+      if (settingsSurface) {
+        return h('div', { className: CLS + '-page' }, bodyOf());
+      }
 
       return h('div', { className: CLS + '-card' + (open ? ' ' + CLS + '-cardOpen' : '') },
         header,
@@ -713,41 +783,60 @@ window.__ModuleLoader__.load({
     /** Services this entry needs before it applies. */
     const inject = ['slots', 'locale'];
 
+    /** Nav id this plugin's page claims inside the Settings dialog. */
+    const SECTION_ID = 'dsh-gateway';
+
     /**
-     * Register the dictionaries, the stylesheet and the configuration page.
+     * Register the dictionaries, the stylesheet and the settings page.
      * @param ctx - browser plugin context.
      */
     function apply(ctx) {
       try {
         ctx.effect(installStyle, 'dsh-gateway: panel stylesheet');
         ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-gateway: dictionaries');
-        /* Two seats, the same card — the shape `dsh-connect-workbuddy` uses for
-         * the same reason:
+        const t = ctx.locale.bind(NS);
+        /* The page lives in the Settings dialog (sidebar foot → Settings), as
+         * one nav row beside General / Models / Plugins — the destination the
+         * operator opened this repo's request for.
          *
-         *   - `plugins.bundle.config` is the package page's own configuration
-         *     section, so opening the package from the list already shows the
-         *     card without a second click,
-         *   - `plugins.row.config` is the page a row's configure control opens,
-         *     where the same card sits under the host's row header.
+         * `ctx.slots.inject(name, …)` IS the capability probe: it resolves when
+         * the slot is declared and otherwise stays queued, so a host without
+         * `settings.section` costs one no-op instead of a registration that
+         * throws. No version check: a version string turns "not supported here"
+         * into "never registers anywhere".
          *
-         * They are different pages, not two copies on one screen. A deployment
-         * may mount this package under a different Loader entry id, and the two
-         * sides of the key comparison are exact, so every spelling this plugin
-         * is known by registers the same component: separate keys are separate
-         * cells, not a conflict. */
-        const keys = ['dsh-gateway', 'include:dsh-gateway'];
-        ctx.slots.inject('plugins.bundle.config', function* registerBundles() {
-          for (const key of keys) {
-            yield ctx.slots.register({
-              name: 'plugins.bundle.config',
-              key,
-              priority: 30,
-              locale: NS,
-            }, GatewayPanel);
-          }
+         * The page and its nav glyph register from the same callback because the
+         * shell renders `settings.section.icon` with `{ only: row.id }` — the
+         * glyph's cell only exists while this page's id does, and one fiber
+         * disposes both.
+         *
+         * `surface: 'settings'` is load-bearing: `GatewayPanel` drops its own
+         * card header on that surface (the shell draws the title and close
+         * control) and renders its four sections as the page body. */
+        ctx.slots.inject('settings.section', function* registerSection() {
+          yield ctx.slots.register({
+            name: 'settings.section',
+            id: SECTION_ID,
+            order: 35,
+            label: () => t('meta.title'),
+            locale: NS,
+            inject: () => ({ t, surface: 'settings' }),
+          }, GatewayPanel);
+          yield ctx.slots.register({
+            name: 'settings.section.icon',
+            id: SECTION_ID,
+            locale: NS,
+          }, (iconProps) => h(GatewayIcon, {
+            className: CLS + '-navIcon',
+            size: typeof iconProps?.size === 'number' ? iconProps.size : 16,
+          }));
         });
+        /* The plugin row's own page keeps the same component: the Plugins list
+         * is where a reader who does not know about Settings will look, and
+         * dropping the seat there would send them hunting. That surface passes
+         * `view: 'page'` and no `surface`, so the card header comes back. */
         ctx.slots.inject('plugins.row.config', function* registerRows() {
-          for (const key of keys) {
+          for (const key of ['dsh-gateway', 'include:dsh-gateway']) {
             yield ctx.slots.register({
               name: 'plugins.row.config',
               key: key + '#' + key,
