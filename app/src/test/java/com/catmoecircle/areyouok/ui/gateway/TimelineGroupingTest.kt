@@ -81,6 +81,24 @@ class TimelineGroupingTest {
     }
 
     @Test
+    fun `blank assistant step does not split the work group`() {
+        val messages = listOf(
+            user(),
+            thinking(),
+            tool("t1"),
+            assistant("a-empty", ""),
+            thinking("th2"),
+            tool("t2"),
+        )
+        val entries = buildTimelineEntries(messages, running = false)
+
+        // 空正文的 assistant 不是回复：整轮仍然只收成一个工作步骤分组。
+        assertEquals(2, entries.size)
+        val group = entries[1] as TimelineEntry.WorkGroup
+        assertEquals(listOf("th", "t1", "th2", "t2"), group.items.map { it.id })
+    }
+
+    @Test
     fun `final replies folds intermediate replies into the preceding group`() {
         val messages = listOf(
             user(),
@@ -226,6 +244,84 @@ class TimelineGroupingTest {
         assertTrue(entries[4] is TimelineEntry.WorkGroup)
         assertEquals("a1", (entries[2] as TimelineEntry.Single).message.id)
         assertEquals("a2", (entries[5] as TimelineEntry.Single).message.id)
+    }
+
+    private fun questionCard(id: String = "qc") =
+        message(id, ChatRole.QUESTION, "")
+
+    @Test
+    fun `answered question card is its own entry and never folded into work steps`() {
+        val messages = listOf(
+            user(),
+            tool("t1"),
+            questionCard(),
+            thinking("th2"),
+            tool("t2"),
+            assistant("a1", "好的"),
+        )
+        val entries = buildTimelineEntries(messages, running = false)
+
+        // user | 第一段工作步骤 | 提问卡片 | 第二段工作步骤 | 助手回复
+        assertEquals(5, entries.size)
+        assertEquals("u", (entries[0] as TimelineEntry.Single).message.id)
+        assertEquals(listOf("t1"), (entries[1] as TimelineEntry.WorkGroup).items.map { it.id })
+        val card = entries[2] as TimelineEntry.Single
+        assertEquals(ChatRole.QUESTION, card.message.role)
+        assertEquals("qc", card.message.id)
+        assertEquals(listOf("th2", "t2"), (entries[3] as TimelineEntry.WorkGroup).items.map { it.id })
+        assertEquals("a1", (entries[4] as TimelineEntry.Single).message.id)
+
+        // 任何工作步骤分组里都不能出现问答卡片。
+        val folded = entries.filterIsInstance<TimelineEntry.WorkGroup>()
+            .flatMap { it.items }
+            .map { it.id }
+        assertTrue("qc" !in folded)
+    }
+
+    @Test
+    fun `answered question card starts a new latest run for deferred collapse`() {
+        val messages = listOf(
+            user("u1"),
+            tool("t1"),
+            assistant("a1", "第一轮汇报"),
+            questionCard(),
+            thinking("th2"),
+            tool("t2"),
+            assistant("a2", "继续处理"),
+        )
+        val entries = buildTimelineEntries(
+            messages,
+            running = false,
+            deferCollapse = true,
+            keepAllReplies = false,
+        )
+
+        // 提问之前的这一轮已经收起。
+        assertEquals(listOf("t1"), (entries[1] as TimelineEntry.WorkGroup).items.map { it.id })
+        assertEquals("a1", (entries[2] as TimelineEntry.Single).message.id)
+        // 卡片独立成条，且之后的一轮才是「最新一轮」，保持逐条展开。
+        assertEquals("qc", (entries[3] as TimelineEntry.Single).message.id)
+        assertEquals(
+            listOf("th2", "t2", "a2"),
+            entries.drop(4).map { (it as TimelineEntry.Single).message.id },
+        )
+    }
+
+    @Test
+    fun `trailing answered question card does not expand the previous turn`() {
+        val messages = listOf(user("u1"), tool("t1"), assistant("a1", "第一轮汇报"), questionCard())
+        val entries = buildTimelineEntries(
+            messages,
+            running = false,
+            deferCollapse = true,
+            keepAllReplies = false,
+        )
+
+        // 卡片是最后一个可见消息时，它自己独立成条，上一轮保持收起（不当作「最新一轮」）。
+        assertEquals(4, entries.size)
+        assertTrue(entries[1] is TimelineEntry.WorkGroup)
+        assertEquals("a1", (entries[2] as TimelineEntry.Single).message.id)
+        assertEquals("qc", (entries[3] as TimelineEntry.Single).message.id)
     }
 
     @Test

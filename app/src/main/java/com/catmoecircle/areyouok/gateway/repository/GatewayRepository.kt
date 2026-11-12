@@ -134,6 +134,18 @@ class GatewayRepository(
 
     private val assembler = MessageAssembler()
 
+    /**
+     * 已作答提问卡片（按会话缓存，LRU 上限）。
+     *
+     * 切会话/重载历史时时间线由 REST 历史整体重建，而服务端历史里没有问答记录；
+     * 缓存一份并在重建后按 seq 锚点插回，用户切走再回来仍能看到选了哪些选项。
+     */
+    private val answeredQuestions = object : LinkedHashMap<String, List<AnsweredQuestionCard>>(8, 0.75f, true) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<String, List<AnsweredQuestionCard>>?,
+        ): Boolean = size > MAX_ANSWERED_QUESTION_SESSIONS
+    }
+
     private var connectionJob: Job? = null
     private var historyJob: Job? = null
 
@@ -725,6 +737,8 @@ class GatewayRepository(
         }
         if (_selectedSessionId.value != sessionId) return
         assembler.reset(page.messages.toHistoryChatMessages())
+        // 服务端历史里没有「已作答提问」：把本机缓存按锚点插回去，切走再回来不丢。
+        restoreAnsweredQuestions(sessionId)
         publishMessages()
         // 记下最老一条消息的 seq 作为下一页游标；`hasMore` 决定顶部是否还能继续加载。
         oldestSeq = page.messages.mapNotNull { it.seq }.minOrNull()
@@ -972,26 +986,38 @@ class GatewayRepository(
         }
     }
 
-    suspend fun answer(eventId: String, value: JsonElement): Boolean {
-        if (eventId.isBlank()) return false
+    /** 提交审批/提问答案的结果：区分「网关接受」与「别的设备已经处理」。 */
+    private enum class AnswerOutcome { ACCEPTED, ALREADY_RESOLVED, FAILED }
+
+    suspend fun answer(eventId: String, value: JsonElement): Boolean =
+        submitAnswer(eventId, value) != AnswerOutcome.FAILED
+
+    /**
+     * 提交一次审批/提问答案。
+     *
+     * 404/409 表示这次请求已经被别的设备处理：本地待处理事件照样移除，但答案没有被采纳，
+     * 调用方不能把它当成「已生效的回答」（提问卡片据此不补记录）。
+     */
+    private suspend fun submitAnswer(eventId: String, value: JsonElement): AnswerOutcome {
+        if (eventId.isBlank()) return AnswerOutcome.FAILED
         return try {
             transport.api.answerIntervention(eventId, value)
             removeIntervention(eventId)
-            true
+            AnswerOutcome.ACCEPTED
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: GatewayException) {
             if (error.isNotFound || error.isConflict) {
                 removeIntervention(eventId)
                 emitNotice(NoticeLevel.INFO, "该请求已在其他设备处理")
-                true
+                AnswerOutcome.ALREADY_RESOLVED
             } else {
                 emitNotice(NoticeLevel.ERROR, "提交失败：${error.userMessage()}")
-                false
+                AnswerOutcome.FAILED
             }
         } catch (error: Throwable) {
             emitNotice(NoticeLevel.ERROR, "提交失败：${error.toUserMessage()}")
-            false
+            AnswerOutcome.FAILED
         }
     }
 
@@ -1007,12 +1033,62 @@ class GatewayRepository(
      * [eventId] 必须是 waterfall 的真 `eventId`（不是 WS 事件帧的 `ev-<seq>`），
      * 否则网关 404、桌面端弹窗不会消失（见 `Intervention.fromEvent`）。
      */
-    suspend fun answerQuestion(eventId: String, answers: List<QuestionAnswer>): Boolean =
-        answer(eventId, InterventionAnswer.question(answers))
+    suspend fun answerQuestion(eventId: String, answers: List<QuestionAnswer>): Boolean {
+        // 先取卡片再提交：提交成功后 repository 会把待处理事件移除，题目就没了。
+        val intervention = _pendingInterventions.value.firstOrNull { it.eventId == eventId }
+        return when (submitAnswer(eventId, InterventionAnswer.question(answers))) {
+            // 只有网关真正接受时才补卡片：别的设备已处理时，这次选择并没有生效。
+            AnswerOutcome.ACCEPTED -> {
+                recordAnsweredQuestion(intervention, answers)
+                true
+            }
+            // 本地待处理事件已经移除，交互层面算成功（只是不记卡片）。
+            AnswerOutcome.ALREADY_RESOLVED -> true
+            AnswerOutcome.FAILED -> false
+        }
+    }
 
-    /** 简化版本：只带选项 label。 */
+    /**
+     * 把「已作答的提问」补进当前对话时间线（对齐桌面端：选项与答案在聊天里可见）。
+     *
+     * 只补当前会话的：别的对话里的提问不该出现在这里。同一次提问只记一条。
+     */
+    private fun recordAnsweredQuestion(intervention: Intervention?, answers: List<QuestionAnswer>) {
+        val card = intervention ?: return
+        if (!card.isQuestion) return
+        val questions = card.questions
+        if (questions.isEmpty() || answers.isEmpty()) return
+        val sessionId = card.sessionId
+        if (sessionId != null && sessionId != _selectedSessionId.value) return
+        val id = "question-${card.eventId}"
+        // 锚点取「作答前时间线里最大的消息 seq」：重建后插到第一条 seq 更大的消息之前，
+        // 后续助手回复仍在卡片后面。
+        val afterSeq = assembler.snapshot().mapNotNull { it.seq }.maxOrNull()
+        val time = clock()
+        // 先给正在流式的助手消息收尾：卡片之后到达的增量必须另起一条，
+        // 否则后续正文会继续长在卡片上方，时间线顺序就错了。
+        assembler.finishStreaming()
+        if (assembler.appendAnsweredQuestion(questions, answers, id = id, time = time)) {
+            publishMessages()
+            val sessionId = card.sessionId ?: _selectedSessionId.value ?: return
+            val cached = answeredQuestions[sessionId].orEmpty().filterNot { it.id == id }
+            answeredQuestions[sessionId] =
+                (cached + AnsweredQuestionCard(id, questions, answers, time, afterSeq))
+                    .takeLast(MAX_ANSWERED_QUESTIONS_PER_SESSION)
+        }
+    }
+
+    /** 历史重建后把本机缓存的已作答提问插回时间线（位置按作答时的 seq 锚点）。 */
+    private fun restoreAnsweredQuestions(sessionId: String) {
+        val cards = answeredQuestions[sessionId] ?: return
+        for (card in cards) {
+            assembler.insertAnsweredQuestion(card.toChatMessage(), card.afterSeq)
+        }
+    }
+
+    /** 简化版本：只带选项 label；同样在成功后补时间线卡片。 */
     suspend fun answerQuestion(eventId: String, answers: Map<String, List<String>>): Boolean =
-        answer(eventId, InterventionAnswer.question(answers))
+        answerQuestion(eventId, answers.map { (id, selected) -> QuestionAnswer(id = id, selected = selected) })
 
     fun close() {
         disconnect()
@@ -1038,6 +1114,10 @@ class GatewayRepository(
 
         /** 首连（REST 自举）最多重试次数，之后转入 ERROR 等用户手动重连。 */
         private const val MAX_BOOTSTRAP_ATTEMPTS = 3
+
+        /** 已作答提问卡片的缓存上限：最多记多少个会话、每个会话多少条。 */
+        private const val MAX_ANSWERED_QUESTION_SESSIONS = 16
+        private const val MAX_ANSWERED_QUESTIONS_PER_SESSION = 20
 
     }
 }

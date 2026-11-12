@@ -1,6 +1,8 @@
 package com.catmoecircle.areyouok.gateway.repository
 
 import com.catmoecircle.areyouok.gateway.protocol.MessageImage
+import com.catmoecircle.areyouok.gateway.protocol.Question
+import com.catmoecircle.areyouok.gateway.protocol.QuestionAnswer
 import com.catmoecircle.areyouok.gateway.transport.GatewayEndpoint
 
 /** 连接状态机（交接文档 §13D：发现 → 连接 → 在线 → 错误/重连）。 */
@@ -43,6 +45,8 @@ enum class ChatRole {
     THINKING,
     TOOL,
     SYSTEM,
+    /** 已作答的提问卡片：问题与用户提交的选择，留在对话里可回看（对齐桌面端）。 */
+    QUESTION,
 }
 
 /** UI 直接消费的消息模型：流式 delta 会合并进最后一条 assistant 消息。 */
@@ -68,6 +72,10 @@ data class ChatMessage(
      * 只存引用不存字节：点击/可见时按需向网关要预览，PC 上文件没了就显示不出来。
      */
     val images: List<MessageImage> = emptyList(),
+    /** 问答卡片的题目列表（仅 [ChatRole.QUESTION] 使用）。 */
+    val questions: List<Question> = emptyList(),
+    /** 问答卡片里用户提交的回答（仅 [ChatRole.QUESTION] 使用）。 */
+    val answers: List<QuestionAnswer> = emptyList(),
 )
 
 enum class NoticeLevel { INFO, WARN, ERROR }

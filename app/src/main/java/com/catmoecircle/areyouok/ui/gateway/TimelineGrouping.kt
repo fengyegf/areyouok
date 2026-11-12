@@ -45,26 +45,29 @@ internal fun buildTimelineEntries(
     keepAllReplies: Boolean = true,
 ): List<TimelineEntry> {
     if (messages.isEmpty()) return emptyList()
+    // 空正文的 assistant 只是「这一步没有回复」的落盘记录（工具步只有 reasoning +
+    // tool-call）：不展示，也绝不截断工作步骤分组。
+    val visible = messages.filterNot {
+        it.role == ChatRole.ASSISTANT && it.text.isBlank() && it.images.isEmpty()
+    }
+    if (visible.isEmpty()) return emptyList()
     // 「下次有新消息时」只推迟最新一轮；末尾只有 system 通知时仍算最新。
-    val latestRunStart = latestRunStart(messages)
+    val latestRunStart = latestRunStart(visible)
 
     val entries = ArrayList<TimelineEntry>()
     var index = 0
-    while (index < messages.size) {
-        val message = messages[index]
-        if (message.role == ChatRole.USER || message.role == ChatRole.SYSTEM) {
+    while (index < visible.size) {
+        val message = visible[index]
+        if (message.role.isTimelineBoundary) {
             entries += TimelineEntry.Single(message)
             index++
             continue
         }
         val start = index
-        while (index < messages.size &&
-            messages[index].role != ChatRole.USER &&
-            messages[index].role != ChatRole.SYSTEM
-        ) {
+        while (index < visible.size && !visible[index].role.isTimelineBoundary) {
             index++
         }
-        val run = messages.subList(start, index).toList()
+        val run = visible.subList(start, index).toList()
         val live = running && start == latestRunStart
         val streaming = run.any { it.streaming }
         val complete = !live && !streaming
@@ -81,16 +84,22 @@ internal fun buildTimelineEntries(
 /** 最新一轮的起始下标；最后一条可见消息是 user 时返回 -1（下一次输入已经到来）。 */
 private fun latestRunStart(messages: List<ChatMessage>): Int {
     val last = messages.indexOfLast { it.role != ChatRole.SYSTEM }
-    if (last < 0 || messages[last].role == ChatRole.USER) return -1
+    if (last < 0 || messages[last].role.isTimelineBoundary) return -1
     var start = last
-    while (start > 0 &&
-        messages[start - 1].role != ChatRole.USER &&
-        messages[start - 1].role != ChatRole.SYSTEM
-    ) {
+    while (start > 0 && !messages[start - 1].role.isTimelineBoundary) {
         start--
     }
     return start
 }
+
+/**
+ * 是否把时间线切成「独立一条」的边界角色。
+ *
+ * 用户输入、系统通知、问答卡片都把工作步骤分组截断：问答卡片是对话内容的一部分，
+ * 不能被折叠进「工作步骤」里。
+ */
+private val ChatRole.isTimelineBoundary: Boolean
+    get() = this == ChatRole.USER || this == ChatRole.SYSTEM || this == ChatRole.QUESTION
 
 /** 一轮里的片段：一段连续的工作步骤，或一条助手回复。 */
 private sealed interface TurnSegment {

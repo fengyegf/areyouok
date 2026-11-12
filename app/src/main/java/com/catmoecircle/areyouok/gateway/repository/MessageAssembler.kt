@@ -2,6 +2,8 @@ package com.catmoecircle.areyouok.gateway.repository
 
 import com.catmoecircle.areyouok.gateway.protocol.Message
 import com.catmoecircle.areyouok.gateway.protocol.MessageImage
+import com.catmoecircle.areyouok.gateway.protocol.Question
+import com.catmoecircle.areyouok.gateway.protocol.QuestionAnswer
 
 /**
  * 把 REST 历史与 WS 增量（`message.delta` / 完整消息 / 工具事件）拼成时间线。
@@ -352,6 +354,52 @@ class MessageAssembler {
             time = message.time,
             meta = meta,
         )
+        return true
+    }
+
+    /**
+     * 记录一次「已作答的提问」：把题目和用户选择追加成时间线里的一张卡片。
+     *
+     * 桌面端会把提问与答案留在对话里，App 提交后卡片消失、聊天记录里什么都没有，
+     * 回看时不知道刚才选了什么。这里在提交成功后补一条 [ChatRole.QUESTION]，
+     * 之后再来的流式正文自然排在它后面（顺序与真实对话一致）。
+     *
+     * 同一次提问只记一条（重试提交 / 补发不会重复）；[id] 用提问的 eventId 派生。
+     */
+    fun appendAnsweredQuestion(
+        questions: List<Question>,
+        answers: List<QuestionAnswer>,
+        id: String,
+        time: Long? = null,
+    ): Boolean {
+        if (questions.isEmpty()) return false
+        if (items.any { it.id == id }) return false
+        items += ChatMessage(
+            id = id,
+            role = ChatRole.QUESTION,
+            text = "",
+            time = time,
+            questions = questions,
+            answers = answers,
+        )
+        return true
+    }
+
+    /**
+     * 历史重建后把缓存的「已作答提问」插回时间线（切会话再回来不丢卡片）。
+     *
+     * [afterSeq] 是作答时时间线里最大的消息 seq：插到第一条 seq 更大的消息之前，
+     * 这样后续助手回复仍在卡片后面，顺序与作答当时一致。找不到锚点（历史分页没覆盖、
+     * 或还没有新消息）时追加到末尾。同 id 已存在则跳过，避免重复。
+     */
+    fun insertAnsweredQuestion(card: ChatMessage, afterSeq: Long?): Boolean {
+        if (items.any { it.id == card.id }) return false
+        if (afterSeq == null) {
+            items += card
+            return true
+        }
+        val index = items.indexOfFirst { item -> item.seq != null && item.seq > afterSeq }
+        if (index < 0) items += card else items.add(index, card)
         return true
     }
 

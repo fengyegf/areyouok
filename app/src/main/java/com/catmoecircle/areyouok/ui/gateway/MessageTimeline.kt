@@ -467,6 +467,7 @@ private fun MessageRow(message: ChatMessage, workStepDisplay: WorkStepDisplay, l
         ChatRole.THINKING -> ThinkingRow(message, workStepDisplay)
         ChatRole.TOOL -> ToolStepRow(message, workStepDisplay, live)
         ChatRole.SYSTEM -> SystemLine(message)
+        ChatRole.QUESTION -> AnsweredQuestionCard(message)
     }
 }
 
