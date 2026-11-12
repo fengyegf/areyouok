@@ -6,7 +6,8 @@ import com.catmoecircle.areyouok.gateway.protocol.Message
  * 把 REST 历史与 WS 增量（`message.delta` / 完整消息 / 工具事件）拼成时间线。
  *
  * 三条规则：
- * 1. `seq` 相同的历史/完整消息只保留一条（重连补发不会重复）；
+ * 1. `seq` 相同的历史/完整消息只保留一条；没有 `seq` 时用消息 `id` 当稳定身份
+ *    （重连补发 / 历史分页重叠都不会重复；绝不按正文文本去重，同文本的两条真实消息各占一行）；
  * 2. 流式 delta 合并进最后一条 streaming assistant 消息，完整消息到达后落定；
  * 3. 本机发送的乐观 user 消息在服务端回显时原地替换，避免闪两条。
  *
@@ -70,21 +71,29 @@ class MessageAssembler {
         items.removeAt(resultIndex)
     }
 
-    /** 合并一条完整消息（REST 历史或 `message.user`/`message.assistant` 事件）。 */
+    /**
+     * 合并一条完整消息（REST 历史或 `message.user`/`message.assistant` 事件）。
+     *
+     * 身份以 `seq` 优先、其次消息 `id`：网关重连时会重放同一批持久消息
+     * （帧 seq 是新的，但消息 seq/id 不变），命中已有行就原地更新，不再追加。
+     */
     fun appendFull(message: Message, optimisticText: String? = null): Boolean {
         val role = message.role.toChatRole()
         val text = message.text
         val seq = message.seq
-
-        if (seq != null) {
-            val existing = items.indexOfFirst { it.seq == seq && !it.pending }
-            if (existing >= 0) {
-                items[existing] = items[existing].copy(
-                    text = text.ifBlank { items[existing].text },
-                    streaming = false,
-                )
-                return false
-            }
+        // 稳定身份：seq 优先，没有 seq 时用消息 id（重连补发 / 历史分页重叠时据此合并）。
+        val identity = message.id
+        val existing = items.indexOfFirst { item ->
+            !item.pending &&
+                ((seq != null && item.seq == seq) || (identity != null && item.id == identity))
+        }
+        if (existing >= 0) {
+            items[existing] = items[existing].copy(
+                text = text.ifBlank { items[existing].text },
+                seq = seq ?: items[existing].seq,
+                streaming = false,
+            )
+            return false
         }
 
         if (role == ChatRole.USER) {
@@ -213,6 +222,21 @@ class MessageAssembler {
                 return false
             }
         }
+        // 同一事件的重连补发：seq 是稳定身份，命中时并回原行（历史里的工具行没有 callId）。
+        if (seq != null) {
+            val existing = items.indexOfLast { it.role == ChatRole.TOOL && it.seq == seq }
+            if (existing >= 0) {
+                val current = items[existing]
+                items[existing] = current.copy(
+                    text = summary?.takeIf { it.isNotBlank() } ?: current.text,
+                    meta = toolName ?: current.meta,
+                    callId = callId ?: current.callId,
+                    arguments = arguments ?: current.arguments,
+                    running = running,
+                )
+                return false
+            }
+        }
         if (mergeWithPending) {
             // 历史记录里的 tool.call 没有 callId（只剩「工具名 + 空正文」），
             // 实时结果到达时按顺序并回最近一条，不要新起一行。
@@ -294,7 +318,14 @@ class MessageAssembler {
      */
     fun appendContext(message: Message, meta: String?): Boolean {
         val seq = message.seq
-        if (seq != null && items.any { it.seq == seq && !it.pending }) return false
+        val identity = message.id
+        if (items.any { item ->
+                !item.pending &&
+                    ((seq != null && item.seq == seq) || (identity != null && item.id == identity))
+            }
+        ) {
+            return false
+        }
         items += ChatMessage(
             id = message.id ?: seq?.let { "seq-$it" } ?: "context-${++localCounter}",
             role = ChatRole.SYSTEM,

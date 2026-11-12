@@ -6,6 +6,7 @@ import com.catmoecircle.areyouok.gateway.protocol.GatewayJson
 import com.catmoecircle.areyouok.gateway.protocol.Intervention
 import com.catmoecircle.areyouok.gateway.protocol.InterventionAnswer
 import com.catmoecircle.areyouok.gateway.protocol.Message
+import com.catmoecircle.areyouok.gateway.protocol.MessageSource
 import com.catmoecircle.areyouok.gateway.protocol.ModelCatalog
 import com.catmoecircle.areyouok.gateway.protocol.ModelSelection
 import com.catmoecircle.areyouok.gateway.protocol.PermissionCatalog
@@ -17,6 +18,7 @@ import com.catmoecircle.areyouok.gateway.protocol.Topics
 import com.catmoecircle.areyouok.gateway.protocol.Workspace
 import com.catmoecircle.areyouok.gateway.protocol.bool
 import com.catmoecircle.areyouok.gateway.protocol.eventKind
+import com.catmoecircle.areyouok.gateway.protocol.long
 import com.catmoecircle.areyouok.gateway.protocol.string
 import com.catmoecircle.areyouok.gateway.protocol.withModelSelection
 import com.catmoecircle.areyouok.gateway.protocol.withPermissionPreset
@@ -128,6 +130,7 @@ class GatewayRepository(
     private var replayBoundary: Long? = null
 
     private val assembler = MessageAssembler()
+
     private var connectionJob: Job? = null
     private var historyJob: Job? = null
 
@@ -140,7 +143,7 @@ class GatewayRepository(
     /** WS 事件去重水位（由事件 seq 推进；`ready.seq` 只用于展示，不参与去重）。 */
     private var lastAppliedSeq: Long = 0L
 
-    // ------------------------------------------------------------ 连接生命周期
+    // ------------------------------------------------------------ 连接生命周期    // ------------------------------------------------------------ 连接生命周期
 
     fun connect(endpoint: GatewayEndpoint) {
         val sameServer = lastEndpoint?.serverId == endpoint.serverId
@@ -303,8 +306,11 @@ class GatewayRepository(
 
             is StreamUpdate.Resynced -> {
                 emitNotice(NoticeLevel.WARN, "连接出现缺口，正在重新同步")
+                // 先把水位记下来再清零：`sinceSeq` 必须是「我们真正看到过的最后一条」，
+                // 否则会退化成「把整个 ring 重新回放一遍」（旧实现的补齐串味就在这里）。
+                val since = lastAppliedSeq
                 lastAppliedSeq = 0L
-                catchUpAfterResync()
+                catchUpAfterResync(since)
             }
 
             is StreamUpdate.ProtocolError -> emitNotice(
@@ -324,9 +330,8 @@ class GatewayRepository(
     }
 
     /** `resync` 后用 `/v1/events?sinceSeq=` 补发；缺口太大则整页刷新。 */
-    private suspend fun catchUpAfterResync() {
-        val since = lastAppliedSeq.takeIf { it > 0L }
-        val page = runCatching { transport.api.events(since) }.getOrNull()
+    private suspend fun catchUpAfterResync(since: Long) {
+        val page = runCatching { transport.api.events(since.takeIf { it > 0L }) }.getOrNull()
         if (page != null && !page.gap && page.events.isNotEmpty()) {
             page.events.forEach { event ->
                 val seq = event.seq
@@ -349,7 +354,7 @@ class GatewayRepository(
         data = data,
     )
 
-    // ------------------------------------------------------------ 事件应用
+    // ------------------------------------------------------------ 事件应用    // ------------------------------------------------------------ 事件应用
 
     private fun applyEvent(frame: EventFrame) {
         val data = frame.data
@@ -421,6 +426,7 @@ class GatewayRepository(
                     toolName = data.string("toolName") ?: data.string("name") ?: data.string("tool"),
                     callId = data.string("callId") ?: data.string("id"),
                     summary = data.string("summary") ?: data.string("title"),
+                    seq = data.long("seq"),
                     arguments = data.string("arguments"),
                     running = true,
                 )
@@ -433,6 +439,7 @@ class GatewayRepository(
                     toolName = data.string("toolName") ?: data.string("name"),
                     callId = data.string("callId") ?: data.string("id"),
                     summary = data.string("summary") ?: data.string("text") ?: data.string("result"),
+                    seq = data.long("seq"),
                     mergeWithPending = true,
                     running = false,
                 )
@@ -477,10 +484,27 @@ class GatewayRepository(
 
     private fun decodeMessage(data: JsonObject): Message? {
         val source = (data["message"] as? JsonObject) ?: data
-        val message = runCatching {
+        val decoded = runCatching {
             GatewayJson.json.decodeFromJsonElement(Message.serializer(), source)
+        }.getOrNull() ?: return null
+        // 网关在事件顶层另带 `seq` / `time` / `role` / `text` / `source`：
+        // `data.message` 只是 DSH 原始消息（没有 seq），只解码它会丢掉事件 seq。
+        // 而 seq 是消息在时间线里的稳定身份：丢了以后重连补发 / 历史分页无法识别
+        // 「这条我已经有了」，同一条消息会被再插一条（真机「重连后首条消息重复」）。
+        val message = decoded.copy(
+            seq = data.long("seq") ?: decoded.seq,
+            time = data.long("time") ?: decoded.time,
+            role = data.string("role") ?: decoded.role,
+            text = decoded.text.ifBlank { data.string("text") ?: "" },
+            source = decoded.source ?: decodeSource(data["source"] as? JsonObject),
+        )
+        return message.takeIf { it.text.isNotBlank() || it.seq != null }
+    }
+
+    private fun decodeSource(value: JsonObject?): MessageSource? = value?.let { source ->
+        runCatching {
+            GatewayJson.json.decodeFromJsonElement(MessageSource.serializer(), source)
         }.getOrNull()
-        return message?.takeIf { it.text.isNotBlank() || it.seq != null }
     }
 
     private fun decodeSessionSummary(data: JsonObject): SessionSummary? {
@@ -983,5 +1007,6 @@ class GatewayRepository(
 
         /** 首连（REST 自举）最多重试次数，之后转入 ERROR 等用户手动重连。 */
         private const val MAX_BOOTSTRAP_ATTEMPTS = 3
+
     }
 }
