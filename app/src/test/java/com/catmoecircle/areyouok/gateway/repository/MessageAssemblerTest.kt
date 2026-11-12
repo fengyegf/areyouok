@@ -73,6 +73,23 @@ class MessageAssemblerTest {
     }
 
     @Test
+    fun `tool-only assistant step does not create an empty message`() {
+        val assembler = MessageAssembler()
+        assembler.appendDelta("先跑一下测试", kind = "reasoning")
+        assembler.appendTool(toolName = "run_code", callId = "call-1", summary = null, seq = 2, running = true)
+        assembler.appendTool(toolName = null, callId = "call-1", summary = "ok", seq = 3)
+
+        // DSH 的一个 step 只有 reasoning + tool-call：落盘的 assistant 正文为空。
+        val added = assembler.appendFull(Message(seq = 4, role = "assistant", text = ""))
+
+        assertFalse(added)
+        assertEquals(
+            listOf(ChatRole.THINKING, ChatRole.TOOL),
+            assembler.snapshot().map { it.role },
+        )
+    }
+
+    @Test
     fun `tool call and result share one row`() {
         val assembler = MessageAssembler()
         assembler.appendTool(toolName = "pwsh", callId = "call-1", summary = null, seq = 1)
