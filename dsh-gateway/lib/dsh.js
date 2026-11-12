@@ -57,6 +57,9 @@ const STABLE_RESET_MS = 30_000
 const CALL_TIMEOUT_MS = 30_000
 const COOKIE_TIMEOUT_MS = 15_000
 const OPEN_TIMEOUT_MS = 15_000
+const FILE_TIMEOUT_MS = 20_000
+/** Hard cap for one host file read (bytes); the gateway preview route uses it too. */
+const MAX_HOST_FILE_BYTES = 16 * 1024 * 1024
 const WATCHDOG_INTERVAL_MS = 5_000
 /** 没收到过 DSH ping 时的保守空闲阈值（mock/静默链路）。 */
 const WATCHDOG_IDLE_MS = 60_000
@@ -568,6 +571,68 @@ export class DshLoopbackClient {
       )
     }
     return result.value
+  }
+
+  /**
+   * 读取 DSH 侧的一个文件（走宿主的认证路由 `GET /api/file`）。
+   *
+   * 图片预览用它按需取字节：不落盘、不做网关侧缓存；文件在 PC 上被删掉后
+   * 请求自然失败，和桌面端看到的结果一致。
+   *
+   * @param {string} path - 绝对路径（调用方已解析）。
+   * @param {{maxBytes?:number, signal?:AbortSignal}} [opts]
+   * @returns {Promise<{contentType:string, bytes:Buffer}>}
+   */
+  async readFile(path, opts = {}) {
+    const target = typeof path === 'string' ? path : ''
+    if (target === '') throw new DshCallError('invalid_request', 'api/file', 'path is required')
+    const maxBytes = Number(opts?.maxBytes) > 0 ? Number(opts.maxBytes) : MAX_HOST_FILE_BYTES
+    const endpoint = `api/file?path=${encodeURIComponent(target)}`
+    const signal = this._composeSignal(opts?.signal, FILE_TIMEOUT_MS)
+
+    let cookie = await this.ensureCookie()
+    let response = await this._getFile(endpoint, cookie, signal)
+    if (response.status === 401) {
+      this._log('warn', 'api/file: 401 from DSH, refreshing cookie and retrying once')
+      cookie = await this.refreshCookie()
+      response = await this._getFile(endpoint, cookie, signal)
+    }
+
+    if (!response.ok) {
+      const code = response.status === 404
+        ? 'not_found'
+        : response.status === 403 ? 'forbidden' : response.status === 413 ? 'too_large' : 'call_failed'
+      throw new DshCallError(code, 'api/file', `HTTP ${response.status}`)
+    }
+    const declared = Number(response.headers.get('content-length'))
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      throw new DshCallError('too_large', 'api/file', `file exceeds ${maxBytes} bytes`)
+    }
+    const buffer = Buffer.from(await response.arrayBuffer())
+    if (buffer.byteLength > maxBytes) {
+      throw new DshCallError('too_large', 'api/file', `file exceeds ${maxBytes} bytes`)
+    }
+    return {
+      contentType: String(response.headers.get('content-type') ?? ''),
+      bytes: buffer,
+    }
+  }
+
+  /** 发一次认证 GET（文件通道；失败统一映射为 DshCallError）。 */
+  async _getFile(endpoint, cookie, signal) {
+    const fetchImpl = this._requireFetch()
+    const init = {
+      method: 'GET',
+      headers: { cookie, accept: '*/*' },
+      signal,
+    }
+    try {
+      return await fetchImpl(`${this.origin}/${endpoint}`, init)
+    } catch (error) {
+      if (error?.name === 'AbortError') throw new DshCallError('aborted', 'api/file', 'DSH request was aborted')
+      if (error?.name === 'TimeoutError') throw new DshCallError('timeout', 'api/file', 'DSH request timed out')
+      throw new DshCallError('transport_error', 'api/file', `DSH request failed: ${error?.message ?? error}`)
+    }
   }
 
   /**

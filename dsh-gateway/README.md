@@ -110,6 +110,9 @@ POST /v1/sessions                       新建会话
 GET  /v1/sessions/{id}/state            运行/待输入状态
 GET  /v1/sessions/{id}/messages         历史消息分页
 POST /v1/sessions/{id}/messages         发送消息 {text,mode:"queue"|"steer"}
+GET  /v1/sessions/{id}/attachments/{attId}?mediaType=&width=&height=&bytes=&name=
+                                        按需预览一张会话图片（宿主存储，不落盘）
+GET  /v1/sessions/{id}/image?path=      按需预览 PC 上的一张图片文件（绝对路径或相对会话目录，仅图片扩展名）
 POST /v1/sessions/{id}/interrupt        打断
 POST /v1/sessions/{id}/model            切换模型
 GET  /v1/models                         模型目录

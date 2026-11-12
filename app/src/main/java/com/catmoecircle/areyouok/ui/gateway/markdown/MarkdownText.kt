@@ -53,6 +53,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.catmoecircle.areyouok.ui.gateway.LocalImageSessionId
+import com.catmoecircle.areyouok.ui.gateway.RemoteImage
+import com.catmoecircle.areyouok.ui.gateway.markdownImageUrl
 import com.catmoecircle.areyouok.R
 
 /** 手机端正文基准字号 / 行高（与聊天正文一致，表格 / 代码按比例缩小）。 */
@@ -115,6 +118,64 @@ private fun CursorLine() {
     )
 }
 
+/**
+ * 段落：正文下面按需预览其中的图片。
+ *
+ * 图片只按链接取（网关现场读 PC 上的那一份），不下载、不存盘；取不到时
+ * 正文里仍保留 `🖼 alt` 说明文字，和以前一致。
+ */
+@Composable
+private fun ParagraphView(
+    block: MdBlock.Paragraph,
+    color: Color,
+    fontSize: TextUnit,
+    lineHeight: TextUnit,
+    showCursor: Boolean,
+) {
+    val images = remember(block.inlines) { collectImages(block.inlines) }
+    val sessionId = LocalImageSessionId.current
+    // 解析不出地址的图片（没有会话、空链接）继续用 `🖼 alt` 文字兜底。
+    val previewable = remember(images, sessionId) {
+        images.mapNotNull { image -> markdownImageUrl(image.url, sessionId)?.let { image to it } }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        InlineText(
+            inlines = block.inlines,
+            style = TextStyle(fontSize = fontSize, lineHeight = lineHeight, color = color),
+            modifier = Modifier.fillMaxWidth(),
+            showCursor = showCursor,
+            suppressImageGlyph = previewable.isNotEmpty(),
+        )
+        for ((image, url) in previewable) {
+            RemoteImage(
+                url = url,
+                contentDescription = image.alt.ifBlank { null },
+                maxWidth = 300.dp,
+                maxHeight = 380.dp,
+            )
+        }
+    }
+}
+
+/** 段落（含强调/链接里）的全部图片节点。 */
+private fun collectImages(inlines: List<MdInline>): List<MdInline.Image> {
+    val images = ArrayList<MdInline.Image>()
+    fun walk(nodes: List<MdInline>) {
+        for (node in nodes) {
+            when (node) {
+                is MdInline.Image -> images += node
+                is MdInline.Strong -> walk(node.children)
+                is MdInline.Emphasis -> walk(node.children)
+                is MdInline.Strikethrough -> walk(node.children)
+                is MdInline.Link -> walk(node.children)
+                else -> Unit
+            }
+        }
+    }
+    walk(inlines)
+    return images
+}
+
 @Composable
 private fun MdBlockView(
     block: MdBlock,
@@ -124,10 +185,11 @@ private fun MdBlockView(
     showCursor: Boolean,
 ) {
     when (block) {
-        is MdBlock.Paragraph -> InlineText(
-            inlines = block.inlines,
-            style = TextStyle(fontSize = fontSize, lineHeight = lineHeight, color = color),
-            modifier = Modifier.fillMaxWidth(),
+        is MdBlock.Paragraph -> ParagraphView(
+            block = block,
+            color = color,
+            fontSize = fontSize,
+            lineHeight = lineHeight,
             showCursor = showCursor,
         )
 
@@ -522,14 +584,16 @@ private fun InlineText(
     style: TextStyle,
     modifier: Modifier = Modifier,
     showCursor: Boolean = false,
+    /** 图片已经作为独立预览渲染时不重复输出 `🖼 alt` 占位文字。 */
+    suppressImageGlyph: Boolean = false,
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val uriHandler = LocalUriHandler.current
     val linkColor = colorScheme.primary
     val codeBackground = colorScheme.surfaceVariant.copy(alpha = 0.85f)
 
-    val rendered = remember(inlines, style, showCursor, linkColor, codeBackground) {
-        buildInlineString(inlines, style, linkColor, codeBackground, showCursor)
+    val rendered = remember(inlines, style, showCursor, linkColor, codeBackground, suppressImageGlyph) {
+        buildInlineString(inlines, style, linkColor, codeBackground, showCursor, suppressImageGlyph)
     }
     var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
 
@@ -555,6 +619,7 @@ private fun buildInlineString(
     linkColor: Color,
     codeBackground: Color,
     showCursor: Boolean,
+    suppressImageGlyph: Boolean = false,
 ): RenderedInline {
     val links = ArrayList<LinkRange>()
     val baseSize = style.fontSize.takeIf { it.isSp } ?: BodyFontSize
@@ -608,8 +673,10 @@ private fun buildInlineString(
                         withStyle(
                             SpanStyle(color = linkColor, textDecoration = linkDecoration),
                         ) {
-                            append("🖼 ")
-                            append(node.alt)
+                            if (!suppressImageGlyph) {
+                                append("🖼 ")
+                                append(node.alt)
+                            }
                         }
                         links += LinkRange(start, length, node.url)
                     }

@@ -107,6 +107,38 @@ export function messageText(message) {
   return parts.join('\n')
 }
 
+/**
+ * 从 DSH 消息的 content 块中提取「已入库」的图片引用。
+ *
+ * DSH 会话记录把图片存成 `{type:'image', attachment:{attachmentId, mediaType,
+ * width, height, bytes, name?}}`（见 `ImageBlock` / `ImageAttachmentRef`）；
+ * 只带 base64 `data` 的即时图片不会出现在记录里，直接忽略。
+ *
+ * @param {unknown} content - `[{type:'image', attachment:{…}}]` 形状的 content 数组。
+ * @returns {Array<{attachmentId:string, mediaType:string, width?:number,
+ *   height?:number, bytes?:number, name?:string}>}
+ */
+export function imagesOfContent(content) {
+  const images = []
+  for (const block of asArray(content)) {
+    if (!isRecord(block) || block.type !== 'image') continue
+    const attachment = isRecord(block.attachment) ? block.attachment : null
+    if (attachment === null) continue
+    const attachmentId = text(attachment.attachmentId)
+    const mediaType = text(attachment.mediaType)
+    if (attachmentId === '' || !mediaType.startsWith('image/')) continue
+    images.push(clean({
+      attachmentId,
+      mediaType,
+      width: num(attachment.width),
+      height: num(attachment.height),
+      bytes: num(attachment.bytes),
+      name: text(attachment.name) || undefined,
+    }))
+  }
+  return images
+}
+
 /** 规范化提问项列表（保留未知字段，保证不丢信息）。 */
 function normalizeQuestions(value) {
   return asArray(value)
@@ -212,6 +244,7 @@ function normalizeDurableEvent(sessionId, event) {
   switch (type) {
     case 'user/message': {
       const message = isRecord(event.data) ? event.data : payload
+      const images = imagesOfContent(message.content)
       return {
         kind: 'message.user',
         topic,
@@ -223,6 +256,7 @@ function normalizeDurableEvent(sessionId, event) {
           role: 'user',
           text: messageText(message),
           message,
+          ...(images.length > 0 ? { images } : {}),
           // DSH 用 `source.kind` 区分「真人输入」与机器注入（tool-jobs 通知、
           // subagent 结算、团队消息、runtime-context…）。客户端据此决定是否
           // 当成用户气泡展示，避免把后台任务通知画成用户自己发的话。
@@ -232,6 +266,7 @@ function normalizeDurableEvent(sessionId, event) {
     }
     case 'assistant/message': {
       const message = isRecord(payload.message) ? payload.message : undefined
+      const images = imagesOfContent(message?.content)
       return {
         kind: 'message.assistant',
         topic,
@@ -245,6 +280,7 @@ function normalizeDurableEvent(sessionId, event) {
           role: 'assistant',
           text: messageText(message),
           message,
+          ...(images.length > 0 ? { images } : {}),
           interrupted: payload.interrupted === true ? true : undefined,
           usage: isRecord(payload.usage) ? payload.usage : undefined,
         }),
@@ -290,6 +326,7 @@ function normalizeDurableEvent(sessionId, event) {
     case 'tool/result': {
       const message = isRecord(payload.message) ? payload.message : undefined
       const callId = text(message?.source?.callId) || text(payload.callId)
+      const images = imagesOfContent(message?.content)
       return {
         kind: 'tool.result',
         topic,
@@ -303,6 +340,7 @@ function normalizeDurableEvent(sessionId, event) {
           callId: callId || undefined,
           text: messageText(message),
           message,
+          ...(images.length > 0 ? { images } : {}),
           error: isRecord(payload.error) ? payload.error : undefined,
           meta: payload.meta,
         }),

@@ -27,6 +27,7 @@
 
 import { createServer as createHttpServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
+import { extname, isAbsolute, resolve } from 'node:path'
 import {
   HttpError,
   normalizeOrigin,
@@ -41,6 +42,7 @@ import {
   formatHost,
   pairingUri,
 } from './panel.js'
+import { imagesOfContent } from './normalize.js'
 import { formatFingerprint } from './tls.js'
 
 /** DSH version this plugin was verified against. */
@@ -67,6 +69,26 @@ const MAX_MESSAGE_LIMIT = 200
 /** Preset value shape accepted by `/v1/sessions/{id}/permission` (`[a-z0-9-]+`). */
 const PRESET_VALUE_PATTERN = /^[a-z0-9-]+$/
 
+/** Stored-image attachment ids are opaque tokens; reject path-ish characters. */
+const ATTACHMENT_ID_PATTERN = /^[A-Za-z0-9._-]{1,200}$/
+
+/** Media types the preview route will echo back (anything else is refused). */
+const IMAGE_MEDIA_TYPE_PATTERN = /^image\/[a-z0-9.+-]{1,64}$/i
+
+/** File extensions the session-image preview route may read. */
+const PREVIEW_IMAGE_TYPES = new Map([
+  ['.png', 'image/png'],
+  ['.jpg', 'image/jpeg'],
+  ['.jpeg', 'image/jpeg'],
+  ['.webp', 'image/webp'],
+  ['.gif', 'image/gif'],
+  ['.bmp', 'image/bmp'],
+  ['.avif', 'image/avif'],
+])
+
+/** Upper bound for one preview read (bytes). */
+const MAX_PREVIEW_BYTES = 16 * 1024 * 1024
+
 /** @returns {boolean} 是否为普通对象（非数组、非 null）。 */
 function isRecord(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -82,6 +104,8 @@ const ROUTES = [
   ['GET', /^\/v1\/sessions\/([^/]+)\/state$/, 'sessionState'],
   ['GET', /^\/v1\/sessions\/([^/]+)\/messages$/, 'messagesList'],
   ['POST', /^\/v1\/sessions\/([^/]+)\/messages$/, 'messagesSend'],
+  ['GET', /^\/v1\/sessions\/([^/]+)\/attachments\/([^/]+)$/, 'attachment'],
+  ['GET', /^\/v1\/sessions\/([^/]+)\/image$/, 'sessionImage'],
   ['POST', /^\/v1\/sessions\/([^/]+)\/interrupt$/, 'sessionInterrupt'],
   ['POST', /^\/v1\/sessions\/([^/]+)\/model$/, 'sessionModel'],
   ['POST', /^\/v1\/sessions\/([^/]+)\/permission$/, 'sessionPermission'],
@@ -115,6 +139,23 @@ function decodeSegment(value) {
   } catch {
     throw new HttpError(400, 'invalid_request', 'malformed path parameter')
   }
+}
+
+/**
+ * Write one binary preview body.
+ *
+ * `private, no-store` keeps the bytes out of proxies and device caches: the
+ * image stays a preview of the PC file, not a copy of it.
+ */
+function writeBinary(res, status, buffer, contentType) {
+  if (res.headersSent || res.writableEnded) return
+  res.writeHead(status, {
+    'content-type': contentType,
+    'content-length': String(buffer.byteLength),
+    'cache-control': 'private, no-store',
+    'x-content-type-options': 'nosniff',
+  })
+  res.end(buffer)
 }
 
 /** Extract the selectable preset values from a `permissionPresets/catalog` value. */
@@ -167,6 +208,18 @@ function withReasoning(message, content) {
 }
 
 /**
+ * Attach the `images` array to a `/v1` message when the content has stored images.
+ *
+ * Each entry is the durable `ImageAttachmentRef` DSH keeps in the session record;
+ * the client builds `<base>/v1/sessions/<id>/attachments/<attachmentId>?…` from it.
+ */
+function withImages(message, content) {
+  const images = imagesOfContent(content)
+  if (images.length > 0) message.images = images
+  return message
+}
+
+/**
  * Map one DSH session event (`{type, seq, time, data}`) to a `/v1` message.
  * @returns {{seq:number, role:string, text:string, time:number, kind:string}|null}
  */
@@ -181,7 +234,7 @@ export function recordToMessage(record) {
   const time = Number.isFinite(event.time) ? Math.trunc(event.time) : 0
   switch (type) {
     case 'user/message':
-      return {
+      return withImages({
         seq,
         role: 'user',
         text: textOfContent(data.content),
@@ -189,27 +242,27 @@ export function recordToMessage(record) {
         kind: 'message',
         // 只透传来源标记（kind/summary/…），客户端用它区分真人消息与机器注入。
         ...(isRecord(data.source) ? { source: data.source } : {}),
-      }
+      }, data.content)
     case 'assistant/message': {
       const content = data.message?.content ?? data.content
-      return withReasoning({
+      return withImages(withReasoning({
         seq,
         role: 'assistant',
         text: textOfContent(content),
         time,
         kind: 'message',
-      }, content)
+      }, content), content)
     }
     case 'tool/result': {
       const message = data.message !== null && typeof data.message === 'object' ? data.message : {}
       const isError = message.isError === true || data.isError === true
-      return {
+      return withImages({
         seq,
         role: 'tool',
         text: textOfContent(message.content ?? data.content),
         time,
         kind: isError ? 'tool.error' : 'tool.result',
-      }
+      }, message.content ?? data.content)
     }
     case 'tool/call':
       return {
@@ -237,45 +290,46 @@ function hubCachedMessage(item) {
       kind,
     }
     if (typeof item.reasoning === 'string' && item.reasoning !== '') message.reasoning = item.reasoning
-    return message
+    return withImages(message, item.message?.content)
   }
   if (typeof item.role === 'string' && (item.role === 'user' || item.role === 'tool')) {
     const kind = typeof item.kind === 'string' && item.kind !== 'message.user' && item.kind !== 'message.assistant'
       ? item.kind
       : 'message'
-    return {
+    return withImages({
       seq: Number.isFinite(item.seq) ? Math.trunc(item.seq) : 0,
       role: item.role,
       text: typeof item.text === 'string' ? item.text : '',
       time: Number.isFinite(item.time) ? Math.trunc(item.time) : 0,
       kind,
       ...(isRecord(item.message?.source) ? { source: item.message.source } : {}),
-    }
+    }, item.message?.content)
   }
   const kind = typeof item.kind === 'string' ? item.kind : ''
   const data = item.data !== null && typeof item.data === 'object' ? item.data : null
   if (data === null) return null
   if (kind === 'message.user') {
-    return {
+    const content = data.message?.content ?? data.content
+    return withImages({
       seq: Number.isFinite(item.seq) ? Math.trunc(item.seq) : 0,
       role: 'user',
-      text: textOfContent(data.message?.content ?? data.content),
+      text: textOfContent(content),
       time: Number.isFinite(item.ts) ? Math.trunc(item.ts) : 0,
       kind: 'message',
       ...(isRecord(data.message?.source)
         ? { source: data.message.source }
         : isRecord(data.source) ? { source: data.source } : {}),
-    }
+    }, content)
   }
   if (kind === 'message.assistant') {
     const content = data.message?.content ?? data.content
-    return withReasoning({
+    return withImages(withReasoning({
       seq: Number.isFinite(item.seq) ? Math.trunc(item.seq) : 0,
       role: 'assistant',
       text: textOfContent(content),
       time: Number.isFinite(item.ts) ? Math.trunc(item.ts) : 0,
       kind: 'message',
-    }, content)
+    }, content), content)
   }
   return null
 }
@@ -649,7 +703,29 @@ export class ApiServer {
     if (this.dsh === null || this.dsh?.connected === false || code === 'not_connected' || code === 'unavailable') {
       return { status: 503, code: 'dsh_unavailable', message: 'the DSH link is unavailable' }
     }
-    if (code === 'not_found' || code === 'session_not_found') return { status: 404, code: 'not_found', message: 'not found' }
+    if (code === 'attachment/not-found' || code === 'not_found' || code === 'session_not_found' ||
+      code === 'ATTACHMENT_NOT_FOUND') {
+      return { status: 404, code: 'not_found', message: 'not found' }
+    }
+    // DSH 把附件读取失败统一成 `session/attachment-invalid`，真正的原因在
+    // `details.reason`（`ATTACHMENT_NOT_FOUND` / `IMAGE_TOO_LARGE` / …）。
+    if (code === 'session/attachment-invalid') {
+      const reason = String(error.details?.details?.reason ?? error.details?.reason ?? '')
+      if (reason === 'ATTACHMENT_NOT_FOUND') return { status: 404, code: 'not_found', message: 'not found' }
+      if (reason === 'IMAGE_TOO_LARGE' || reason === 'IMAGES_TOO_LARGE' || reason === 'IMAGE_TOO_MANY_PIXELS') {
+        return { status: 413, code: 'too_large', message: 'the image is too large to preview' }
+      }
+      return { status: 400, code: 'invalid_request', message: 'the attachment reference is not valid' }
+    }
+    if (code === 'attachment/type-mismatch' || code === 'IMAGE_TYPE_MISMATCH' ||
+      code === 'INVALID_ATTACHMENT_REF') {
+      return { status: 400, code: 'invalid_request', message: 'the attachment reference is not valid' }
+    }
+    if (code === 'IMAGE_TOO_LARGE' || code === 'IMAGES_TOO_LARGE' || code === 'IMAGE_TOO_MANY_PIXELS') {
+      return { status: 413, code: 'too_large', message: 'the image is too large to preview' }
+    }
+    if (code === 'forbidden') return { status: 403, code: 'forbidden', message: 'the file is not readable' }
+    if (code === 'too_large') return { status: 413, code: 'too_large', message: 'the file is too large to preview' }
     if (code === 'invalid_request' || code === 'invalid_argument' || code === 'bad_request') {
       return { status: 400, code: 'invalid_request', message: 'the DSH rejected the request as invalid' }
     }
@@ -906,6 +982,69 @@ export class ApiServer {
     writeJson(res, 200, { ok: true, messages, cursor, hasMore })
   }
 
+  /**
+   * `GET /v1/sessions/{id}/attachments/{attachmentId}?mediaType=…&width=…&height=…&bytes=…&name=…`
+   *
+   * Streams one stored conversation image back to the device on demand, without
+   * copying it anywhere: the DSH `session/attachment` call needs the complete
+   * `ImageAttachmentRef` (id + media type + byte length + dimensions), which the
+   * client already got in `message.images`.
+   */
+  async hAttachment({ res, url, params }) {
+    const sessionId = decodeSegment(params[0])
+    const attachmentId = decodeSegment(params[1])
+    if (!ATTACHMENT_ID_PATTERN.test(attachmentId)) {
+      throw new HttpError(400, 'invalid_request', 'malformed attachment id')
+    }
+    const mediaType = String(url.searchParams.get('mediaType') ?? '')
+    if (!IMAGE_MEDIA_TYPE_PATTERN.test(mediaType)) {
+      throw new HttpError(400, 'invalid_request', 'mediaType is required')
+    }
+    const width = intParam(url.searchParams.get('width'), null, 1)
+    const height = intParam(url.searchParams.get('height'), null, 1)
+    const bytes = intParam(url.searchParams.get('bytes'), null, 1)
+    if (width === null || height === null || bytes === null) {
+      throw new HttpError(400, 'invalid_request', 'width, height and bytes are required')
+    }
+    const attachment = { attachmentId, mediaType, width, height, bytes }
+    const name = cleanName(url.searchParams.get('name') ?? '', '')
+    if (name !== '') attachment.name = name
+    const value = await this.#dsh().call('session/attachment', { request: { sessionId, attachment } })
+    const data = typeof value?.data === 'string' ? value.data : ''
+    if (data === '') throw new HttpError(502, 'dsh_error', 'the DSH returned no image bytes')
+    const buffer = Buffer.from(data, 'base64')
+    if (buffer.byteLength === 0) throw new HttpError(502, 'dsh_error', 'the DSH returned an empty image')
+    if (buffer.byteLength > MAX_PREVIEW_BYTES) {
+      throw new HttpError(413, 'too_large', 'the image is too large to preview')
+    }
+    writeBinary(res, 200, buffer, mediaType)
+  }
+
+  /**
+   * `GET /v1/sessions/{id}/image?path=<absolute file path, or cwd-relative>`
+   *
+   * Previews one image file that lives on the PC (the path a Markdown image
+   * points at). Only image extensions are served, only through the host's
+   * authenticated file route, and nothing is stored on the gateway or device.
+   */
+  async hSessionImage({ res, url, params }) {
+    const sessionId = decodeSegment(params[0])
+    const raw = String(url.searchParams.get('path') ?? '').trim()
+    if (raw === '') throw new HttpError(400, 'invalid_request', 'path is required')
+    if (raw.includes('\0')) throw new HttpError(400, 'invalid_request', 'malformed path')
+    const cwd = this.#sessionCwd(sessionId)
+    if (!isAbsolute(raw) && cwd === '') {
+      throw new HttpError(400, 'invalid_request', 'a relative path needs a known session directory')
+    }
+    const absolute = isAbsolute(raw) ? raw : resolve(cwd, raw)
+    const contentType = PREVIEW_IMAGE_TYPES.get(extname(absolute).toLowerCase())
+    if (contentType === undefined) {
+      throw new HttpError(415, 'unsupported_type', 'only image files can be previewed')
+    }
+    const file = await this.#dsh().readFile(absolute, { maxBytes: MAX_PREVIEW_BYTES })
+    writeBinary(res, 200, file.bytes, contentType)
+  }
+
   async hMessagesSend({ req, res, params }) {
     const sessionId = decodeSegment(params[0])
     const body = await readJsonBody(req, BODY_LIMIT)
@@ -1079,6 +1218,23 @@ export class ApiServer {
       gap: Boolean(result?.gap),
       events,
     })
+  }
+
+  /** Work directory of one known session ('' when the hub has no summary yet). */
+  #sessionCwd(sessionId) {
+    const sessions = this.#hubCall('getSessions') ?? []
+    if (!Array.isArray(sessions)) return ''
+    for (const summary of sessions) {
+      if (summary === null || typeof summary !== 'object' || summary.sessionId !== sessionId) continue
+      if (typeof summary.cwd === 'string' && summary.cwd !== '') return summary.cwd
+      // `session/control` baselines carry the directory in the projection values.
+      const values = summary.projections?.values
+      if (values !== null && typeof values === 'object') {
+        if (typeof values.workingDirectory === 'string' && values.workingDirectory !== '') return values.workingDirectory
+        if (typeof values.cwd === 'string' && values.cwd !== '') return values.cwd
+      }
+    }
+    return ''
   }
 
   /** Cached fallback for the messages route. */

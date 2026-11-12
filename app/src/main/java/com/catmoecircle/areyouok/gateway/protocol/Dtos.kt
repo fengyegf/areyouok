@@ -205,7 +205,35 @@ data class Message(
     val reasoning: String? = null,
     /** DSH 用户消息来源：`user` 是真人输入，其它 kind 是机器注入（后台任务/上下文…）。 */
     val source: MessageSource? = null,
+    /**
+     * 消息里携带的图片（DSH `ImageAttachmentRef`）。
+     *
+     * 客户端只拿引用，不下载：真正显示时按需向网关要预览字节
+     * （`GET /v1/sessions/{id}/attachments/{attachmentId}`）。
+     */
+    val images: List<MessageImage> = emptyList(),
 )
+
+/**
+ * 一张已入库图片的引用（DSH `ImageAttachmentRef` 的客户端镜像）。
+ *
+ * `attachmentId / mediaType / width / height / bytes` 必须原样回传给网关，
+ * 宿主会拿它们和存储里的字节做校验。
+ */
+@Serializable
+data class MessageImage(
+    val attachmentId: String = "",
+    val mediaType: String? = null,
+    val width: Int? = null,
+    val height: Int? = null,
+    val bytes: Long? = null,
+    val name: String? = null,
+) {
+    val isUsable: Boolean
+        get() = attachmentId.isNotBlank() &&
+            mediaType?.startsWith("image/") == true &&
+            width != null && height != null && bytes != null
+}
 
 /**
  * DSH `user/message.data.source`。

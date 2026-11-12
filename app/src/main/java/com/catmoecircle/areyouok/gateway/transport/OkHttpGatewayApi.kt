@@ -258,6 +258,39 @@ class OkHttpGatewayApi(
         )
     }
 
+    /**
+     * 取一张图的预览字节：只请求、不缓存、不落盘。
+     *
+     * 相对路径拼到当前网关地址上（带设备令牌）；绝对 http(s) 地址直接取，
+     * 不带网关令牌（那是第三方图片，不该拿到网关凭据）。
+     */
+    override suspend fun fetchImage(url: String): ByteArray? = withContext(Dispatchers.IO) {
+        val target = url.trim()
+        if (target.isEmpty()) return@withContext null
+        val remote = target.startsWith("http://", ignoreCase = true) ||
+            target.startsWith("https://", ignoreCase = true)
+        val endpoint = endpointProvider()
+        val resolved = if (remote) {
+            target
+        } else {
+            val base = endpoint?.baseUrl?.trimEnd('/') ?: return@withContext null
+            base + if (target.startsWith("/")) target else "/$target"
+        }
+        val httpUrl = resolved.toHttpUrlOrNull() ?: return@withContext null
+        val builder = Request.Builder()
+            .url(httpUrl)
+            .header("Accept", "image/*")
+            .header("User-Agent", USER_AGENT)
+        val token = endpoint?.token
+        if (!remote && !token.isNullOrBlank()) {
+            builder.header("Authorization", "Bearer $token")
+        }
+        client.newCall(builder.build()).execute().use { response ->
+            if (!response.isSuccessful) return@withContext null
+            response.body?.bytes()
+        }
+    }
+
     private suspend fun execute(
         baseUrl: String,
         method: String,

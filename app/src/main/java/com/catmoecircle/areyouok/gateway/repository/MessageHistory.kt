@@ -1,6 +1,7 @@
 package com.catmoecircle.areyouok.gateway.repository
 
 import com.catmoecircle.areyouok.gateway.protocol.Message
+import com.catmoecircle.areyouok.gateway.protocol.MessageImage
 
 /**
  * 历史消息 → 时间线条目（纯 Kotlin，无 Android 依赖，JVM 单测覆盖）。
@@ -31,11 +32,12 @@ internal fun List<Message>.toHistoryChatMessages(): List<ChatMessage> {
                     running = true,
                 )
             } else {
+                val images = message.usableImages()
                 val callIndex = pendingCalls.removeFirstOrNull()
                 val call = callIndex?.let { out[it] }
                 if (call != null) {
                     // 原地替换成「调用 + 结果」一行：工具名留在 meta，输出进正文。
-                    out[callIndex] = call.copy(text = message.text, running = false)
+                    out[callIndex] = call.copy(text = message.text, running = false, images = images)
                 } else {
                     out += ChatMessage(
                         id = toolRowId(message, "result"),
@@ -43,6 +45,7 @@ internal fun List<Message>.toHistoryChatMessages(): List<ChatMessage> {
                         text = message.text,
                         seq = message.seq,
                         time = message.time,
+                        images = images,
                     )
                 }
             }
@@ -61,7 +64,8 @@ internal fun List<Message>.toHistoryChatMessages(): List<ChatMessage> {
  * - tool 消息只处理「不带调用配对」的兜底（正常配对在 [toHistoryChatMessages] 里完成）。
  */
 internal fun Message.toTimelineMessages(): List<ChatMessage> {
-    if (text.isBlank() && seq == null && reasoning.isNullOrBlank()) return emptyList()
+    val images = usableImages()
+    if (text.isBlank() && seq == null && reasoning.isNullOrBlank() && images.isEmpty()) return emptyList()
     val role = when (this.role.lowercase()) {
         "user" -> MessageMapping.userRole(this) ?: return emptyList()
         "tool" -> ChatRole.TOOL
@@ -90,7 +94,7 @@ internal fun Message.toTimelineMessages(): List<ChatMessage> {
             time = time,
         )
     }
-    if (text.isNotBlank() || role != ChatRole.ASSISTANT) {
+    if (text.isNotBlank() || role != ChatRole.ASSISTANT || images.isNotEmpty()) {
         messages += ChatMessage(
             id = baseId,
             role = role,
@@ -98,10 +102,15 @@ internal fun Message.toTimelineMessages(): List<ChatMessage> {
             seq = seq,
             time = time,
             meta = meta,
+            images = images,
         )
     }
     return messages
 }
+
+/** 只保留能回传给网关校验的图片引用（id/mediaType/尺寸/字节数齐全）。 */
+internal fun Message.usableImages(): List<MessageImage> =
+    images.filter { it.isUsable }
 
 /** 历史工具行的稳定 id：优先用 seq（历史消息都有），否则退回文本哈希。 */
 private fun toolRowId(message: Message, suffix: String): String {

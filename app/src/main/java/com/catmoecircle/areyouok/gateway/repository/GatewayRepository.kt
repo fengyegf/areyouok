@@ -6,6 +6,7 @@ import com.catmoecircle.areyouok.gateway.protocol.GatewayJson
 import com.catmoecircle.areyouok.gateway.protocol.Intervention
 import com.catmoecircle.areyouok.gateway.protocol.InterventionAnswer
 import com.catmoecircle.areyouok.gateway.protocol.Message
+import com.catmoecircle.areyouok.gateway.protocol.MessageImage
 import com.catmoecircle.areyouok.gateway.protocol.MessageSource
 import com.catmoecircle.areyouok.gateway.protocol.ModelCatalog
 import com.catmoecircle.areyouok.gateway.protocol.ModelSelection
@@ -41,8 +42,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.builtins.ListSerializer
 
 /**
  * dsh-gateway 客户端状态机。
@@ -143,7 +146,24 @@ class GatewayRepository(
     /** WS 事件去重水位（由事件 seq 推进；`ready.seq` 只用于展示，不参与去重）。 */
     private var lastAppliedSeq: Long = 0L
 
-    // ------------------------------------------------------------ 连接生命周期    // ------------------------------------------------------------ 连接生命周期
+    /**
+     * 按需取一张图的预览字节（不落盘）。
+     *
+     * 走当前网关连接：相对路径由 [GatewayApi.fetchImage] 拼成 `/v1/sessions/…`
+     * 并带设备令牌；失败返回 null，UI 显示「无法预览」而不是崩掉。
+     */
+    suspend fun fetchImage(url: String): ByteArray? {
+        if (_connection.value.endpoint == null) return null
+        return try {
+            transport.api.fetchImage(url)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    // ------------------------------------------------------------ 连接生命周期
 
     fun connect(endpoint: GatewayEndpoint) {
         val sameServer = lastEndpoint?.serverId == endpoint.serverId
@@ -442,6 +462,7 @@ class GatewayRepository(
                     seq = data.long("seq"),
                     mergeWithPending = true,
                     running = false,
+                    images = decodeImages(data),
                 )
                 publishMessages()
             }
@@ -487,6 +508,7 @@ class GatewayRepository(
         val decoded = runCatching {
             GatewayJson.json.decodeFromJsonElement(Message.serializer(), source)
         }.getOrNull() ?: return null
+        val images = decodeImages(data)
         // 网关在事件顶层另带 `seq` / `time` / `role` / `text` / `source`：
         // `data.message` 只是 DSH 原始消息（没有 seq），只解码它会丢掉事件 seq。
         // 而 seq 是消息在时间线里的稳定身份：丢了以后重连补发 / 历史分页无法识别
@@ -496,9 +518,18 @@ class GatewayRepository(
             time = data.long("time") ?: decoded.time,
             role = data.string("role") ?: decoded.role,
             text = decoded.text.ifBlank { data.string("text") ?: "" },
+            images = if (images.isNotEmpty()) images else decoded.images,
             source = decoded.source ?: decodeSource(data["source"] as? JsonObject),
         )
-        return message.takeIf { it.text.isNotBlank() || it.seq != null }
+        return message.takeIf { it.text.isNotBlank() || it.seq != null || it.images.isNotEmpty() }
+    }
+
+    /** 事件顶层的 `images`（网关从 DSH content 块里拆出来的图片引用）。 */
+    private fun decodeImages(data: JsonObject): List<MessageImage> {
+        val raw = data["images"] as? JsonArray ?: return emptyList()
+        return runCatching {
+            GatewayJson.json.decodeFromJsonElement(ListSerializer(MessageImage.serializer()), raw)
+        }.getOrDefault(emptyList()).filter { it.isUsable }
     }
 
     private fun decodeSource(value: JsonObject?): MessageSource? = value?.let { source ->

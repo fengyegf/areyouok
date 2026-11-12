@@ -124,6 +124,7 @@ import com.catmoecircle.areyouok.gateway.transport.GatewayEndpoint
 import com.catmoecircle.areyouok.gateway.transport.toUserMessage
 import com.catmoecircle.areyouok.ui.gateway.GatewayStatusDot
 import com.catmoecircle.areyouok.ui.gateway.InterventionDock
+import com.catmoecircle.areyouok.ui.gateway.ImageFetcher
 import com.catmoecircle.areyouok.ui.gateway.MessageTimeline
 import com.catmoecircle.areyouok.ui.gateway.rememberQrScannerLauncher
 import com.catmoecircle.areyouok.ui.settings.SettingsScreen
@@ -468,6 +469,7 @@ fun ChatScreen(modifier: Modifier = Modifier) {
             onAnswerQuestion = { eventId, answers ->
                 scope.launch { repository.answerQuestion(eventId, answers) }
             },
+            imageFetcher = remember(repository) { ImageFetcher { url -> repository.fetchImage(url) } },
             onSelectModel = { provider, model, effort ->
                 scope.launch { repository.selectModel(provider, model, effort) }
             },
@@ -630,6 +632,8 @@ fun ChatScreenContent(
     workStepDisplay: WorkStepDisplay = WorkStepDisplay.DEFAULT,
     workStepCollapseTiming: WorkStepCollapseTiming = WorkStepCollapseTiming.DEFAULT,
     workStepFoldedReplies: WorkStepFoldedReplies = WorkStepFoldedReplies.DEFAULT,
+    /** 按需取图（图片只按链接预览，不落盘）；null 时不加载图片。 */
+    imageFetcher: ImageFetcher? = null,
     modifier: Modifier = Modifier,
 ) {
     val colorScheme = MaterialTheme.colorScheme
@@ -727,6 +731,8 @@ fun ChatScreenContent(
                 hasOlder = state.hasOlderMessages,
                 loadingOlder = state.loadingOlderMessages,
                 onLoadOlder = onLoadOlder,
+                sessionId = state.selectedSessionId,
+                imageFetcher = imageFetcher,
                 modifier = Modifier
                     .fillMaxSize()
                     .windowInsetsPadding(WindowInsets.statusBars)

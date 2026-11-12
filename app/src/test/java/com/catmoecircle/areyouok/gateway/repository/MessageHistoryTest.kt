@@ -1,6 +1,7 @@
 package com.catmoecircle.areyouok.gateway.repository
 
 import com.catmoecircle.areyouok.gateway.protocol.Message
+import com.catmoecircle.areyouok.gateway.protocol.MessageImage
 import com.catmoecircle.areyouok.gateway.protocol.MessageSource
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -113,6 +114,64 @@ class MessageHistoryTest {
         assertEquals("先看代码", rows[1].text)
         assertEquals(ChatRole.ASSISTANT, rows[2].role)
         assertEquals("改好了", rows[2].text)
+    }
+
+    @Test
+    fun `tool result images stay on the merged call row`() {
+        val image = MessageImage(
+            attachmentId = "att-1",
+            mediaType = "image/png",
+            width = 1,
+            height = 1,
+            bytes = 90,
+        )
+        val rows = listOf(
+            call(1, "read_image"),
+            result(2, "Read image").copy(images = listOf(image)),
+        ).toHistoryChatMessages()
+
+        assertEquals(1, rows.size)
+        assertEquals(listOf(image), rows.single().images)
+    }
+
+    @Test
+    fun `user message keeps its images even without text`() {
+        val image = MessageImage(
+            attachmentId = "att-2",
+            mediaType = "image/png",
+            width = 3,
+            height = 2,
+            bytes = 100,
+        )
+        val rows = listOf(
+            Message(
+                seq = 5,
+                role = "user",
+                text = "",
+                source = MessageSource(kind = "user"),
+                images = listOf(image),
+            ),
+        ).toHistoryChatMessages()
+
+        assertEquals(1, rows.size)
+        assertEquals(ChatRole.USER, rows.single().role)
+        assertEquals(listOf(image), rows.single().images)
+    }
+
+    @Test
+    fun `unusable image references are dropped`() {
+        val broken = MessageImage(attachmentId = "", mediaType = "image/png", width = 1, height = 1, bytes = 1)
+        val rows = listOf(
+            Message(
+                seq = 6,
+                role = "user",
+                text = "看图",
+                source = MessageSource(kind = "user"),
+                images = listOf(broken),
+            ),
+        ).toHistoryChatMessages()
+
+        assertTrue(rows.single().images.isEmpty())
     }
 
     @Test

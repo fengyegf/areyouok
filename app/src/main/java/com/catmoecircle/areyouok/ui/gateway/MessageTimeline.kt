@@ -45,6 +45,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -126,6 +127,10 @@ fun MessageTimeline(
     hasOlder: Boolean = false,
     loadingOlder: Boolean = false,
     onLoadOlder: () -> Unit = {},
+    /** 当前会话 id：图片预览按会话解析 PC 上的本地路径。 */
+    sessionId: String? = null,
+    /** 按需取图（不落盘）；null 时不加载图片，只留文字。 */
+    imageFetcher: ImageFetcher? = null,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -244,56 +249,61 @@ fun MessageTimeline(
         }
     }
 
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .imePadding(),
+    CompositionLocalProvider(
+        LocalImageFetcher provides imageFetcher,
+        LocalImageSessionId provides sessionId,
     ) {
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(
-                start = 18.dp,
-                end = 18.dp,
-                top = 8.dp,
-                // 输入区留白；键盘高度已经由外层 imePadding 缩短视口。
-                bottom = ComposerClearance,
-            ),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .imePadding(),
         ) {
-            if (hasOlder) {
-                item(key = "__older_history__") {
-                    OlderHistoryRow(loading = loadingOlder, onLoad = onLoadOlder)
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(
+                    start = 18.dp,
+                    end = 18.dp,
+                    top = 8.dp,
+                    // 输入区留白；键盘高度已经由外层 imePadding 缩短视口。
+                    bottom = ComposerClearance,
+                ),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                if (hasOlder) {
+                    item(key = "__older_history__") {
+                        OlderHistoryRow(loading = loadingOlder, onLoad = onLoadOlder)
+                    }
+                }
+                items(count = entries.size, key = { index -> keys[index] }) { index ->
+                    // 只有运行中会话的最后一条（正在进行的工具调用）才显示「调用中…」，
+                    // 历史里未被结果配对的调用不会误显示成还在跑。
+                    val liveTail = running && index == entries.lastIndex
+                    when (val entry = entries[index]) {
+                        is TimelineEntry.Single -> MessageRow(entry.message, workStepDisplay, liveTail)
+                        is TimelineEntry.WorkGroup -> WorkGroupCard(entry, workStepDisplay)
+                    }
                 }
             }
-            items(count = entries.size, key = { index -> keys[index] }) { index ->
-                // 只有运行中会话的最后一条（正在进行的工具调用）才显示「调用中…」，
-                // 历史里未被结果配对的调用不会误显示成还在跑。
-                val liveTail = running && index == entries.lastIndex
-                when (val entry = entries[index]) {
-                    is TimelineEntry.Single -> MessageRow(entry.message, workStepDisplay, liveTail)
-                    is TimelineEntry.WorkGroup -> WorkGroupCard(entry, workStepDisplay)
-                }
-            }
-        }
 
-        ScrollToBottomButton(
-            visible = showScrollToBottom,
-            onClick = {
-                scope.launch {
-                    val lastIndex = entries.lastIndex + headerCount
-                    listState.scrollToTimelineEnd(
-                        index = lastIndex,
-                        bottomClearancePx = with(density) { ComposerClearance.toPx() },
-                    )
-                    followLatest = true
-                    settled = true
-                }
-            },
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = ScrollToBottomClearance),
-        )
+            ScrollToBottomButton(
+                visible = showScrollToBottom,
+                onClick = {
+                    scope.launch {
+                        val lastIndex = entries.lastIndex + headerCount
+                        listState.scrollToTimelineEnd(
+                            index = lastIndex,
+                            bottomClearancePx = with(density) { ComposerClearance.toPx() },
+                        )
+                        followLatest = true
+                        settled = true
+                    }
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = ScrollToBottomClearance),
+            )
+        }
     }
 }
 
@@ -463,17 +473,32 @@ private fun MessageRow(message: ChatMessage, workStepDisplay: WorkStepDisplay, l
 @Composable
 private fun UserBubble(message: ChatMessage) {
     val colorScheme = MaterialTheme.colorScheme
-    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-        Text(
-            text = message.text,
-            color = colorScheme.onSurface,
-            fontSize = 15.sp,
-            lineHeight = 22.sp,
-            modifier = Modifier
-                .clip(UserBubbleShape)
-                .background(colorScheme.primary.copy(alpha = if (message.pending) 0.10f else 0.16f))
-                .padding(horizontal = 14.dp, vertical = 9.dp),
-        )
+    val sessionId = LocalImageSessionId.current
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.End,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        for (image in message.images) {
+            RemoteImage(
+                url = attachmentPreviewUrl(image, sessionId),
+                contentDescription = image.name,
+                maxWidth = 240.dp,
+                maxHeight = 320.dp,
+            )
+        }
+        if (message.text.isNotBlank()) {
+            Text(
+                text = message.text,
+                color = colorScheme.onSurface,
+                fontSize = 15.sp,
+                lineHeight = 22.sp,
+                modifier = Modifier
+                    .clip(UserBubbleShape)
+                    .background(colorScheme.primary.copy(alpha = if (message.pending) 0.10f else 0.16f))
+                    .padding(horizontal = 14.dp, vertical = 9.dp),
+            )
+        }
     }
 }
 
@@ -790,8 +815,17 @@ private fun ToolStepRow(message: ChatMessage, level: WorkStepDisplay, live: Bool
     ) {
         // 只有展开时才做 JSON 美化：折叠状态下大参数不占主线程。
         val arguments = remember(message.arguments) { formatArguments(message.arguments) }
+        val sessionId = LocalImageSessionId.current
         SelectionContainer {
             Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                for (image in message.images) {
+                    RemoteImage(
+                        url = attachmentPreviewUrl(image, sessionId),
+                        contentDescription = image.name,
+                        maxWidth = 300.dp,
+                        maxHeight = 420.dp,
+                    )
+                }
                 if (!arguments.isNullOrBlank()) {
                     Text(
                         text = stringResource(R.string.gateway_tool_args),
@@ -808,7 +842,7 @@ private fun ToolStepRow(message: ChatMessage, level: WorkStepDisplay, live: Bool
                     )
                     CodeSurface(text = output)
                 }
-                if (arguments.isNullOrBlank() && output.isNullOrBlank()) {
+                if (arguments.isNullOrBlank() && output.isNullOrBlank() && message.images.isEmpty()) {
                     Text(
                         text = stringResource(R.string.gateway_tool_running),
                         color = colorScheme.onSurfaceVariant,

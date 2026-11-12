@@ -122,6 +122,17 @@ interface GatewayApi {
         deviceName: String,
         deviceId: String,
     ): PairResponse
+
+    /**
+     * 取一张图的预览字节。
+     *
+     * 只做「按链接预览」：网关按请求去 PC 上读文件/附件返回，客户端不落盘；
+     * PC 上文件没了就返回 null（桌面端同样显示不出来）。默认不做任何事，
+     * 历史/测试替身不实现图片预览也不影响其他功能。
+     *
+     * @param url 网关相对路径（`/v1/sessions/…`）或图片的绝对 http(s) 地址。
+     */
+    suspend fun fetchImage(url: String): ByteArray? = null
 }
 
 /** REST 请求体错误时的小工具：把异常转换成可展示文案。 */

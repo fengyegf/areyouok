@@ -1,5 +1,6 @@
 package com.catmoecircle.areyouok.gateway.repository
 
+import com.catmoecircle.areyouok.gateway.protocol.MessageImage
 import com.catmoecircle.areyouok.gateway.transport.GatewayEndpoint
 
 /** 连接状态机（交接文档 §13D：发现 → 连接 → 在线 → 错误/重连）。 */
@@ -61,6 +62,12 @@ data class ChatMessage(
     val arguments: String? = null,
     /** 工具已派发、结果尚未返回：工作步骤标题据此显示「正在运行命令」等实时状态。 */
     val running: Boolean = false,
+    /**
+     * 消息附带的图片引用（用户发的图、工具结果里的图）。
+     *
+     * 只存引用不存字节：点击/可见时按需向网关要预览，PC 上文件没了就显示不出来。
+     */
+    val images: List<MessageImage> = emptyList(),
 )
 
 enum class NoticeLevel { INFO, WARN, ERROR }

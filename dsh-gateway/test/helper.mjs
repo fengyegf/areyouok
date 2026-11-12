@@ -367,6 +367,24 @@ export async function request(base, path, options = {}) {
 }
 
 /**
+ * One binary request (image previews). Same auth/redirect rules as {@link request}.
+ * @returns {Promise<{status:number, headers:object, bytes:Buffer}>}
+ */
+export async function requestBinary(base, path, options = {}) {
+  const headers = { ...(options.headers ?? {}) }
+  if (options.token !== undefined) headers.authorization = `Bearer ${options.token}`
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const response = await fetch(`${base}${path}`, {
+    method: options.method ?? 'GET',
+    headers,
+    redirect: 'manual',
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  const bytes = Buffer.from(await response.arrayBuffer())
+  return { status: response.status, headers: response.headers, bytes }
+}
+
+/**
  * One HTTPS request that tolerates the gateway's self-signed certificate.
  *
  * @param {object} options

@@ -1,6 +1,7 @@
 package com.catmoecircle.areyouok.gateway.repository
 
 import com.catmoecircle.areyouok.gateway.protocol.Message
+import com.catmoecircle.areyouok.gateway.protocol.MessageImage
 
 /**
  * 把 REST 历史与 WS 增量（`message.delta` / 完整消息 / 工具事件）拼成时间线。
@@ -81,6 +82,8 @@ class MessageAssembler {
         val role = message.role.toChatRole()
         val text = message.text
         val seq = message.seq
+        val images = message.usableImages()
+
         // 稳定身份：seq 优先，没有 seq 时用消息 id（重连补发 / 历史分页重叠时据此合并）。
         val identity = message.id
         val existing = items.indexOfFirst { item ->
@@ -92,6 +95,7 @@ class MessageAssembler {
                 text = text.ifBlank { items[existing].text },
                 seq = seq ?: items[existing].seq,
                 streaming = false,
+                images = if (images.isNotEmpty()) images else items[existing].images,
             )
             return false
         }
@@ -109,6 +113,7 @@ class MessageAssembler {
                     seq = seq,
                     time = message.time ?: items[optimisticIndex].time,
                     meta = message.kind,
+                    images = images,
                 )
                 return true
             }
@@ -127,9 +132,16 @@ class MessageAssembler {
                     seq = seq ?: current.seq,
                     time = message.time ?: current.time,
                     meta = message.kind ?: current.meta,
+                    images = if (images.isNotEmpty()) images else current.images,
                 )
                 return true
             }
+            // 只有思考链 + 工具调用的 step：正文为空，这条 assistant 记录不是一条
+            // 可见回复。早前会照样追加一条空 assistant 行，时间线在它这里被截断，
+            // 于是每个工具步都单独成组（「运行了代码」卡片之间隔着一条看不见的空行），
+            // 空行本身也渲染成一段空白。历史重建会丢掉空正文（见 MessageHistory），
+            // 所以只有实时流能看到这个现象。
+            if (text.isBlank() && images.isEmpty()) return false
         }
 
         items += ChatMessage(
@@ -139,6 +151,7 @@ class MessageAssembler {
             seq = seq,
             time = message.time,
             meta = message.kind,
+            images = images,
         )
         return true
     }
@@ -207,6 +220,8 @@ class MessageAssembler {
         mergeWithPending: Boolean = false,
         /** 调用事件为 true、结果事件为 false；工作步骤标题据此显示实时活动。 */
         running: Boolean = false,
+        /** 工具结果里的图片（`read_image` 之类）：只存引用，显示时按需预览。 */
+        images: List<MessageImage> = emptyList(),
     ): Boolean {
         if (callId != null) {
             val existing = items.indexOfLast { it.role == ChatRole.TOOL && it.callId == callId }
@@ -218,6 +233,7 @@ class MessageAssembler {
                     seq = seq ?: current.seq,
                     arguments = arguments ?: current.arguments,
                     running = running,
+                    images = if (images.isNotEmpty()) images else current.images,
                 )
                 return false
             }
@@ -233,6 +249,7 @@ class MessageAssembler {
                     callId = callId ?: current.callId,
                     arguments = arguments ?: current.arguments,
                     running = running,
+                    images = if (images.isNotEmpty()) images else current.images,
                 )
                 return false
             }
@@ -268,6 +285,7 @@ class MessageAssembler {
             callId = callId,
             arguments = arguments,
             running = running,
+            images = images,
         )
         return true
     }

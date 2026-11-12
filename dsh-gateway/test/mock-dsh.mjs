@@ -92,6 +92,7 @@ export const RPC_WIRE = Object.freeze({
   'session/create': { keys: ['request'] },
   'session/state': { keys: ['request'] },
   'session/events': { keys: ['request'] },
+  'session/attachment': { keys: ['request'] },
   'session/prompt': { keys: ['request'] },
   'session/cancel': { keys: ['request'] },
   'session/selectModel': { keys: ['request'] },
@@ -300,6 +301,10 @@ export class MockDsh {
     this.failures = new Map()
     /** @type {Map<string, unknown|Function>} */
     this.results = new Map()
+    /** @type {Map<string, {bytes:Buffer, mediaType:string}>} stored conversation images (session/attachment). */
+    this.attachments = new Map()
+    /** @type {Map<string, {bytes:Buffer, mediaType:string}>} host files served by GET /api/file. */
+    this.files = new Map()
     /** When true every RPC/upgrade is refused, simulating a dead host. */
     this.disabled = false
     /** Number of `ready` frames delivered (== number of `$events` opens). */
@@ -826,6 +831,27 @@ export class MockDsh {
     }
 
     if (url.pathname.startsWith('/api/')) {
+      if (url.pathname === '/api/file' && req.method === 'GET') {
+        if (!this._hasCookie(req)) {
+          res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+          res.end('unauthorized')
+          return
+        }
+        const path = url.searchParams.get('path') ?? ''
+        const stored = this.files.get(path)
+        if (stored === undefined) {
+          res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
+          res.end('not found')
+          return
+        }
+        res.writeHead(200, {
+          'content-type': stored.mediaType,
+          'content-length': String(stored.bytes.byteLength),
+          'cache-control': 'private, max-age=31536000, immutable',
+        })
+        res.end(stored.bytes)
+        return
+      }
       if (req.method !== 'POST') {
         res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
         res.end('not found')
@@ -971,6 +997,24 @@ export class MockDsh {
       }
       case 'session/events':
         return this._eventsPage(request)
+      case 'session/attachment': {
+        const ref = isRecord(request.attachment) ? request.attachment : {}
+        const attachmentId = String(ref.attachmentId ?? '')
+        if (attachmentId === 'bad-ref') {
+          // The host rejects references it cannot validate before reading storage.
+          throw new MockDshError('session/attachment-invalid', 'Attachment reference is invalid.', { reason: 'INVALID_ATTACHMENT_REF' })
+        }
+        const stored = this.attachments.get(attachmentId)
+        if (stored === undefined) {
+          // Real hosts report every attachment read failure as one RPC code with
+          // the store's precise reason in `details.reason`.
+          throw new MockDshError('session/attachment-invalid', 'attachment not found', { reason: 'ATTACHMENT_NOT_FOUND' })
+        }
+        if (typeof ref.mediaType === 'string' && ref.mediaType !== stored.mediaType) {
+          throw new MockDshError('session/attachment-invalid', 'attachment media type does not match', { reason: 'IMAGE_TYPE_MISMATCH' })
+        }
+        return { attachment: { ...ref }, data: stored.bytes.toString('base64') }
+      }
       case 'session/prompt':
         return { accepted: true }
       case 'session/cancel':
