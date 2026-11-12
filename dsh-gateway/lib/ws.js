@@ -38,6 +38,14 @@ const SEND_HIGH_WATER = 262_144
 /** Flush once the socket buffer drained below this value. */
 const FLUSH_LOW_WATER = 65_536
 
+/**
+ * `/v1` 能力清单，随 `ready.snapshot.capabilities` 下发。
+ *
+ * 客户端据此判断「这台网关支不支持某个功能」——尤其是 APK 与插件分开升级时：
+ * 老网关没有 `turn.completed`，APK 应该明确提示升级，而不是静默地不再提醒。
+ */
+export const CAPABILITIES = Object.freeze(['turn.completed'])
+
 /** Event kinds that must not be dropped for slow consumers. */
 const CRITICAL_KINDS = new Set([
   'approval.request',
@@ -46,6 +54,9 @@ const CRITICAL_KINDS = new Set([
   'session.status',
   'session.removed',
   'turn.end',
+  // 每轮结束提醒的事实源（见 lib/turns.js）：丢了就等于漏一次「跑完了」，
+  // 而它一轮只有一条，比 message.delta 便宜得多。
+  'turn.completed',
 ])
 
 /** Close codes used by this server (4000-4999 are application private). */
@@ -369,6 +380,7 @@ export class StreamServer {
         sessions: snapshot.sessions.filter((session) => !isSubagentSession(session)),
       }
     }
+    snapshot = { ...snapshot, capabilities: [...CAPABILITIES] }
     const seq = typeof snapshot.seq === 'number' ? snapshot.seq : this.#seq()
     this.#send(conn, {
       t: 'ready',

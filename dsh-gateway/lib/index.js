@@ -34,6 +34,7 @@ import { StreamServer } from './ws.js'
 import { MdnsAdvertiser } from './mdns.js'
 import { ensureTlsMaterial } from './tls.js'
 import { mountPanel } from './panel-routes.js'
+import { watchTurnEnds } from './turns.js'
 import {
   normalizeWaterfall,
   normalizeSessionRecord,
@@ -65,6 +66,19 @@ export function createGateway(options) {
 
   const hub = new EventHub({ config, logger, dir })
   const auth = new AuthService({ hub, config, logger, dir })
+
+  /**
+   * 每轮结束的事实源：订阅宿主 `session/event · turn/end`，广播 `turn.completed`。
+   *
+   * 注册得比监听器更早（`start()` 之前），这样插件加载完成到端口就绪之间的
+   * 轮次结束也不会漏；`ctx.on` 在测试上下文里可能不存在，此时是一个空操作。
+   */
+  let stopTurnWatch = () => {}
+  try {
+    stopTurnWatch = watchTurnEnds({ ctx, hub, logger })
+  } catch (error) {
+    logger.warn(`turn watcher unavailable: ${error?.message ?? error}`)
+  }
 
   /** @type {StreamServer|null} */
   let ws = null
@@ -272,6 +286,12 @@ export function createGateway(options) {
   async function stop() {
     if (disposed) return
     disposed = true
+    try {
+      stopTurnWatch?.()
+    } catch {
+      // ignore
+    }
+    stopTurnWatch = () => {}
     try {
       unmountPanel?.()
     } catch {

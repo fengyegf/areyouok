@@ -205,6 +205,7 @@ class FakeTransport : GatewayTransport {
         data: JsonObject,
         id: String? = null,
         topic: String? = null,
+        ts: Long? = null,
     ) {
         emit(
             StreamUpdate.Event(
@@ -213,6 +214,7 @@ class FakeTransport : GatewayTransport {
                     id = id ?: "ev-$seq",
                     topic = topic,
                     kind = kind,
+                    ts = ts,
                     data = data,
                 ),
             ),

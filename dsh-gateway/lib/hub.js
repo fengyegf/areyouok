@@ -448,6 +448,26 @@ export class EventHub {
   }
 
   /**
+   * 会话标题（列表/通知用；未知会话或没有标题时返回 ''）。
+   *
+   * 与 {@link getSessions} 同一取值来源：顶层 `title` 优先，其次
+   * `projections.values.title`（`_mergeSummary` 已把投影标题回填到顶层）。
+   *
+   * @param {string} sessionId
+   * @returns {string}
+   */
+  sessionTitleOf(sessionId) {
+    const id = text(sessionId)
+    if (id === '') return ''
+    const summary = this._sessions.get(id)
+    if (summary === undefined) return ''
+    const title = text(summary.title)
+    if (title !== '') return title
+    const projected = summary.projections?.values?.title
+    return typeof projected === 'string' ? projected : ''
+  }
+
+  /**
    * 缓存的消息列表（按 seq 升序；来自 message.user / message.assistant 事件）。
    * @param {string} sessionId
    * @returns {object[]}

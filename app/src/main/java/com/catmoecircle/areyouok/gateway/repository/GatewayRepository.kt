@@ -107,30 +107,49 @@ class GatewayRepository(
     private val _sessionCompletions = MutableSharedFlow<SessionCompletion>(extraBufferCapacity = 16)
 
     /**
-     * 会话从运行中落到空闲的完成事件（全局流里所有会话都会发）。
+     * 每轮对话结束的提醒（全局流：所有会话，包括当前没打开的）。
      *
-     * 只在「观察过 running=true」之后才发：App 启动/重连时 REST 里已经是 false 的
-     * 会话不会补发「任务完成」，避免一打开 App 就弹一堆过期提醒。
+     * 判定**只认**网关的 `turn.completed` —— 网关订阅了宿主 `session/event ·
+     * turn/end`（每轮结算时恰好一条），而不是让客户端从 `running` 状态翻转去猜：
+     *
+     * - 状态翻转是「快照」，断线补齐、网关重启后从 `state.json` 恢复的旧
+     *   `running: true`、`session.status` 的重复下发，都会把「很久以前就结束
+     *   的对话」重新翻一遍 —— 这正是「干活时突然收到别的会话的完成提醒」；
+     * - `turn.completed` 是事件，只有真正结束的那一刻才产生；补发的历史事件
+     *   由 `seq ≤ ready.seq` 与时间戳新鲜度（[COMPLETION_FRESH_MS]）挡掉，
+     *   同 `(sessionId, turn)` 也只提醒一次。
+     *
+     * 子智能体会话、正常等审批/回答的会话、被用户打断的轮次都不提醒。
      */
     val sessionCompletions: SharedFlow<SessionCompletion> = _sessionCompletions.asSharedFlow()
 
+    /** 已提醒过的轮次键（`sessionId#turn`，有界 LRU）：补发/重复帧不重复打扰。 */
+    private val notifiedTurns = object : LinkedHashMap<String, Boolean>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>?): Boolean =
+            size > MAX_NOTIFIED_TURNS
+    }
+
     /**
-     * 最近一次观察到的运行中会话（含未选中会话，靠 global 订阅的 `session.status` 维护）。
+     * 网关与本机的时钟差（`网关时间 - 本机时间`，用 `ready.serverTime` 估算）。
      *
-     * 用它识别 true → false 的瞬间；`TURN_END` 与 `session.status` 可能同时到达，
-     * 先到的那条把状态清掉，后到的不会重复发完成事件。
+     * 手机和电脑的时钟经常差几秒到几分钟，直接拿本机时间比事件时间会把
+     * 「刚结束的一轮」判成历史（或反过来）。取不到时不做时间过滤，只靠 seq。
      */
-    private val runningSessions = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    @Volatile
+    private var serverClockOffsetMs: Long? = null
 
     /**
      * 最近一次 `ready` 的 seq 边界。
      *
      * WS 连上后会补发 `lastAppliedSeq` 之后的历史事件（seq ≤ ready.seq），其中的
-     * 「运行 → 空闲」是过去的一轮，不能再弹「任务完成」；只有 seq 超过这个边界的
+     * `turn.completed` 是过去的一轮，不能再弹「任务完成」；只有 seq 超过这个边界的
      * 新事件才算实时完成。
      */
     @Volatile
     private var replayBoundary: Long? = null
+
+    /** 已经就「网关不支持 turn.completed」提示过的 serverId（重连不刷屏）。 */
+    private var turnCapabilityWarnedFor: String? = null
 
     private val assembler = MessageAssembler()
 
@@ -287,14 +306,14 @@ class GatewayRepository(
         runCatching { transport.api.sessions(workspaceId) }.onSuccess { rawSessions ->
             val sessions = normalizeSessions(rawSessions)
             _sessions.value = sessions
-            // 只补记「正在运行」的会话：重连后它结束时仍能提醒；已经是 false 的
-            // 会话故意不补，避免把连接前的旧结束当成刚完成。
-            sessions.forEach { summary ->
-                if (summary.running) runningSessions.add(summary.id)
-            }
+            // running 只是「界面上那个绿点」，不再参与完成判定：
+            // 它在网关重启 / 断线补齐后可能是过期快照，旧实现正是因此把
+            // 「早就结束的对话」当成了刚跑完（见 sessionCompletions 注释）。
             val selected = _selectedSessionId.value
             if (selected == null || sessions.none { it.id == selected }) {
                 sessions.firstOrNull()?.let { selectSessionInternal(it.id) } ?: selectSessionInternal(null)
+            } else {
+                _sessionRunning.value = sessions.firstOrNull { it.id == selected }?.running ?: false
             }
         }
         runCatching { transport.api.interventions() }.onSuccess { _pendingInterventions.value = it }
@@ -306,12 +325,22 @@ class GatewayRepository(
     private suspend fun handleStreamUpdate(update: StreamUpdate) {
         when (update) {
             is StreamUpdate.Ready -> {
-                // ready.seq 之前的事件都是补发：完成提醒只认真实时的新事件。
+                // ready.seq 之前的事件都是补发：完成提醒只认实时的新事件。
                 replayBoundary = update.frame.seq
+                // 顺便校准「网关时钟 vs 本机时钟」：补发事件的时间戳靠它判断新旧。
+                update.frame.serverTime?.let { serverTime ->
+                    serverClockOffsetMs = serverTime - clock()
+                }
+                noteCapabilities(update.frame.snapshot?.capabilities)
                 update.frame.snapshot?.let { snapshot ->
                     if (snapshot.workspaces.isNotEmpty()) _workspaces.value = snapshot.workspaces
                     if (snapshot.sessions.isNotEmpty()) _sessions.value = normalizeSessions(snapshot.sessions)
                     _pendingInterventions.value = snapshot.pending
+                    // 快照是 running 的权威值：界面上那个绿点跟着它对一次，
+                    // 断线期间漏掉的「已结束」不会一直亮着。
+                    _sessionRunning.value = _sessions.value
+                        .firstOrNull { it.id == _selectedSessionId.value }
+                        ?.running ?: false
                 }
                 _connection.value = _connection.value.copy(
                     phase = ConnectionPhase.CONNECTED,
@@ -327,7 +356,7 @@ class GatewayRepository(
             is StreamUpdate.Event -> {
                 val seq = update.frame.seq
                 if (seq != null && seq <= lastAppliedSeq) return
-                applyEvent(update.frame)
+                applyEvent(update.frame, live = isLive(seq))
                 if (seq != null) {
                     lastAppliedSeq = seq
                     _connection.value = _connection.value.copy(
@@ -368,7 +397,8 @@ class GatewayRepository(
             page.events.forEach { event ->
                 val seq = event.seq
                 if (seq != null && seq <= lastAppliedSeq) return@forEach
-                applyEvent(event.toEventFrame())
+                // 补齐的事件一律按「历史」处理：可以重建状态，但绝不触发每轮结束提醒。
+                applyEvent(event.toEventFrame(), live = false)
                 if (seq != null) lastAppliedSeq = seq
             }
             page.seq?.let { seq -> _connection.value = _connection.value.copy(serverSeq = seq) }
@@ -383,12 +413,40 @@ class GatewayRepository(
         id = id,
         topic = topic,
         kind = kind,
+        ts = ts,
         data = data,
     )
 
-    // ------------------------------------------------------------ 事件应用    // ------------------------------------------------------------ 事件应用
+    /** 实时事件 = 在本次 `ready` 边界之后的、并且不是补齐/重放来的。 */
+    private fun isLive(seq: Long?): Boolean {
+        val boundary = replayBoundary ?: return false
+        return seq != null && seq > boundary
+    }
 
-    private fun applyEvent(frame: EventFrame) {
+    /**
+     * 每次 `ready` 检查一次网关能力：没有 `turn.completed` 说明桌面端插件还是旧版，
+     * 「每轮结束提醒」会静默失效 —— 明确提示一次，别让用户以为功能坏了。
+     *
+     * 每个网关（serverId）只提示一次，重连不刷屏。
+     */
+    private fun noteCapabilities(capabilities: List<String>?) {
+        val caps = capabilities.orEmpty()
+        val serverId = lastEndpoint?.serverId ?: ""
+        if (CAPABILITY_TURN_COMPLETED in caps) {
+            if (turnCapabilityWarnedFor == serverId) turnCapabilityWarnedFor = null
+            return
+        }
+        if (turnCapabilityWarnedFor == serverId) return
+        turnCapabilityWarnedFor = serverId
+        emitNotice(
+            NoticeLevel.WARN,
+            "桌面端 dsh-gateway 版本较旧：没有「每轮结束」事件，完成提醒不可用；请更新插件并重启 DSH",
+        )
+    }
+
+    // ------------------------------------------------------------ 事件应用
+
+    private fun applyEvent(frame: EventFrame, live: Boolean = true) {
         val data = frame.data
         val sessionId: String? = data.string("sessionId")
             ?: data.string("agentId")
@@ -396,7 +454,10 @@ class GatewayRepository(
 
         when (frame.eventKind()) {
             EventKind.SESSION_STATUS -> {
-                updateSessionRunning(sessionId, data.bool("running") ?: false, frame.seq)
+                // 缺 `running` 的畸形帧直接忽略：旧实现按 false 兜底，会把任意一条
+                // 形状不对的 status 当成「跑完了」。
+                val running = data.bool("running") ?: return
+                updateSessionRunning(sessionId, running)
             }
 
             EventKind.SESSION_UPDATED -> {
@@ -442,15 +503,17 @@ class GatewayRepository(
                 publishMessages()
             }
 
-            EventKind.TURN_START -> updateSessionRunning(sessionId, true, frame.seq)
+            EventKind.TURN_START -> updateSessionRunning(sessionId, true)
 
             EventKind.TURN_END -> {
-                updateSessionRunning(sessionId, false, frame.seq)
+                updateSessionRunning(sessionId, false)
                 if (isSelected(sessionId)) {
                     assembler.finishStreaming()
                     publishMessages()
                 }
             }
+
+            EventKind.TURN_COMPLETED -> onTurnCompleted(frame, sessionId, live)
 
             EventKind.TOOL_CALL -> {
                 if (!isSelected(sessionId)) return
@@ -631,35 +694,77 @@ class GatewayRepository(
         }
     }
 
-    private fun updateSessionRunning(sessionId: String?, running: Boolean, seq: Long? = null) {
+    private fun updateSessionRunning(sessionId: String?, running: Boolean) {
         val id = sessionId ?: _selectedSessionId.value ?: return
-        val wasRunning = runningSessions.contains(id)
-        if (running) {
-            runningSessions.add(id)
-        } else {
-            runningSessions.remove(id)
-        }
         _sessions.value = _sessions.value.map { if (it.id == id) it.copy(running = running) else it }
         if (id == _selectedSessionId.value) {
             _sessionRunning.value = running
         }
-        if (wasRunning && !running) emitCompletion(id, seq)
     }
 
-    /** 运行中的会话落到空闲：通知层据此弹「任务完成」；子代理会话不提醒。 */
-    private fun emitCompletion(sessionId: String, seq: Long?) {
-        // 补发/重放的历史事件（seq ≤ ready.seq）只是重建状态，不是刚跑完。
-        val boundary = replayBoundary
-        if (seq != null && boundary != null && seq <= boundary) return
-        val summary = _sessions.value.firstOrNull { it.id == sessionId } ?: return
-        if (summary.isSubagent) return
+    /**
+     * 网关的 `turn.completed`：一轮对话真正结束，决定要不要弹「任务完成」。
+     *
+     * 过滤顺序（任何一道不通过就静默丢弃，**不**弹提醒）：
+     * 1. 必须实时：补齐/重放的事件（[live] 为 false，或 seq 没越过 `ready` 边界）；
+     * 2. 必须新鲜：发布时刻到现在的间隔不超过 [COMPLETION_FRESH_MS]（用网关时钟算，
+     *    避免手机与电脑时钟不一致）；这是「连上后突然弹一堆早就结束的对话」的最后一道闸；
+     * 3. 同一轮只提醒一次（`sessionId#turn`）；
+     * 4. 子智能体会话不提醒；
+     * 5. 正在等审批/回答的会话不提醒——它没结束，只是卡住了，那种情况由
+     *    审批/提问通知负责；
+     * 6. 用户主动打断（aborted / cancelled / interrupted）不提醒。
+     */
+    private fun onTurnCompleted(frame: EventFrame, eventSessionId: String?, live: Boolean) {
+        if (!live) return
+        val data = frame.data
+        val sessionId = data.string("sessionId") ?: eventSessionId ?: return
+        if (sessionId.isBlank()) return
+        if (data.bool("subagent") == true) return
+
+        val age = turnAgeMs(frame.ts, data.long("time"))
+        if (age != null && age > COMPLETION_FRESH_MS) return
+
+        val turn = data.long("turn")
+        val key = turnKey(sessionId, turn, frame.id ?: frame.seq)
+        if (!markTurnNotified(key)) return
+
+        val summary = _sessions.value.firstOrNull { it.id == sessionId }
+        if (summary?.isSubagent == true) return
+        if (_pendingInterventions.value.any { it.sessionId == sessionId }) return
+        val reason = data.string("reason")
+        if (reason != null && ABORT_REASONS.any { reason.contains(it, ignoreCase = true) }) return
+
+        // 结束的会话一定不再 running：界面上那个绿点先落下来（实时事件比快照更新）。
+        updateSessionRunning(sessionId, false)
         _sessionCompletions.tryEmit(
             SessionCompletion(
                 sessionId = sessionId,
-                title = summary.displayTitle,
+                title = summary?.displayTitle
+                    ?: data.string("title")?.takeIf { it.isNotBlank() },
                 time = clock(),
             ),
         )
+    }
+
+    /** 事件「距现在多久」（ms）；拿不到时间戳或没有时钟基准时返回 null（不做时间过滤）。 */
+    private fun turnAgeMs(frameTs: Long?, eventTime: Long?): Long? {
+        val publishedAt = frameTs ?: eventTime ?: return null
+        val offset = serverClockOffsetMs ?: return null
+        return clock() + offset - publishedAt
+    }
+
+    /** 轮次键：优先 `sessionId#turn`，退化成事件 id/seq（同一事件不会重复提醒）。 */
+    private fun turnKey(sessionId: String, turn: Long?, fallback: Any?): String {
+        val suffix = turn?.toString() ?: fallback?.toString() ?: "?"
+        return "$sessionId#$suffix"
+    }
+
+    /** 记下「这一轮提醒过了」；返回 true 表示是第一次。 */
+    private fun markTurnNotified(key: String): Boolean = synchronized(notifiedTurns) {
+        if (notifiedTurns.containsKey(key)) return false
+        notifiedTurns[key] = true
+        true
     }
 
     private fun addIntervention(intervention: Intervention) {
@@ -722,8 +827,6 @@ class GatewayRepository(
         if (sessionId == null) return
         transport.subscribe(Topics.session(sessionId))
         val running = _sessions.value.firstOrNull { it.id == sessionId }?.running ?: false
-        // 打开时已经在跑：记下来，这样用户退出后它结束时也能收到「任务完成」。
-        if (running) runningSessions.add(sessionId)
         _sessionRunning.value = running
         historyJob = scope.launch { loadHistory(sessionId) }
     }
@@ -1115,9 +1218,25 @@ class GatewayRepository(
         /** 首连（REST 自举）最多重试次数，之后转入 ERROR 等用户手动重连。 */
         private const val MAX_BOOTSTRAP_ATTEMPTS = 3
 
+        /**
+         * 「每轮结束」提醒的新鲜度窗口：事件发布到现在超过这个时长就不再打扰。
+         *
+         * 断线很久后重连时，网关会补发这段时间内结束的轮次；刚结束（几分钟内）
+         * 的值得提醒，早就结束的只该在会话列表里看到，不该再响一次。
+         */
+        const val COMPLETION_FRESH_MS = 120_000L
+
+        /** 已提醒轮次的记忆上限（超了按 LRU 丢最旧的）。 */
+        private const val MAX_NOTIFIED_TURNS = 256
+
         /** 已作答提问卡片的缓存上限：最多记多少个会话、每个会话多少条。 */
         private const val MAX_ANSWERED_QUESTION_SESSIONS = 16
         private const val MAX_ANSWERED_QUESTIONS_PER_SESSION = 20
 
+        /** 「不是正常跑完」的 turn/end reason：用户主动打断时不再弹完成提醒。 */
+        private val ABORT_REASONS = listOf("abort", "cancel", "interrupt")
+
+        /** 网关 `ready.snapshot.capabilities` 里表示「有每轮结束事件」的取值。 */
+        const val CAPABILITY_TURN_COMPLETED = "turn.completed"
     }
 }

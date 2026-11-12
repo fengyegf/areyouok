@@ -41,7 +41,7 @@ import kotlinx.serialization.json.JsonPrimitive
  * - 审批通知两个 action「允许一次 / 拒绝」，`PendingIntent` 直接回到服务里
  *   `POST /v1/interventions/{eventId}/answer`，不必打开界面；
  * - 审批 / 提问 / 任务完成通知点击后都带上 `sessionId`，由 MainActivity 切到对应对话；
- * - 会话跑完一轮（running true → false）弹「任务完成」，用户正看着该会话时不打扰；
+ * - 每轮对话结束（网关的 `turn.completed`）弹「任务完成」，用户正看着该会话时不打扰；
  * - Android 13+ 未授予 POST_NOTIFICATIONS 时降级：前台服务照常运行，但不再发通知。
  */
 class GatewayService : Service() {
@@ -278,7 +278,7 @@ class GatewayService : Service() {
     }
 
     /**
-     * 会话跑完一轮：弹「任务完成」通知，点一下回到该对话。
+     * 一轮对话结束：弹「任务完成」通知，点一下回到该对话。
      *
      * 用户正看着这个会话（前台 + 选中）时不打扰；看别的会话或 App 在后台时照常提醒。
      */
@@ -302,7 +302,7 @@ class GatewayService : Service() {
     private fun buildTaskNotification(completion: SessionCompletion, notificationId: Int): Notification {
         val name = completion.title?.takeIf { it.isNotBlank() }
             ?: completion.sessionId.take(8)
-        val text = "任务已完成，点击回到该对话查看结果"
+        val text = "已跑完一轮，点击回到该对话查看结果"
         return NotificationCompat.Builder(this, GatewayChannels.TASKS)
             .setSmallIcon(R.drawable.ic_stat_gateway)
             .setContentTitle("任务完成 · $name")
@@ -498,7 +498,7 @@ object GatewayChannels {
             "任务完成",
             NotificationManager.IMPORTANCE_HIGH,
         ).apply {
-            description = "对话跑完一轮后提醒，点通知回到对应对话"
+            description = "对话每跑完一轮就提醒一次，点通知回到对应对话"
             setSound(
                 Settings.System.DEFAULT_NOTIFICATION_URI,
                 AudioAttributes.Builder()

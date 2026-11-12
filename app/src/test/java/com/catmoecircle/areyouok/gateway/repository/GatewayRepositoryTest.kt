@@ -204,12 +204,13 @@ class GatewayRepositoryTest {
     }
 
     @Test
-    fun `running session emits one completion when it goes idle`() = runTest {
+    fun `turn completed notifies once per turn and ignores duplicates`() = runTest {
         val transport = FakeTransport().apply {
             fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "会话一"))
         }
+        val now = 1_700_000_000_000L
         val testScope = scope(StandardTestDispatcher(testScheduler))
-        val repository = GatewayRepository(transport, testScope)
+        val repository = GatewayRepository(transport, testScope, clock = { now })
         val completions = mutableListOf<SessionCompletion>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             repository.sessionCompletions.collect { completions += it }
@@ -217,35 +218,68 @@ class GatewayRepositoryTest {
         repository.connect(endpoint)
         advanceUntilIdle()
 
-        transport.emitEvent(
-            seq = 1,
-            kind = "session.status",
-            data = buildJsonObject {
-                put("sessionId", "s1")
-                put("running", true)
-            },
-        )
+        // ready 的 serverTime 用来校正网关/本机时钟差（这里两者相同）。
+        transport.emit(StreamUpdate.Ready(ReadyFrame(seq = 100, serverTime = now)))
         advanceUntilIdle()
 
-        // turn.end 与 session.status 可能同时到：完成事件只能发一次。
-        transport.emitEvent(seq = 2, kind = "turn.end", data = buildJsonObject { put("sessionId", "s1") })
-        transport.emitEvent(
-            seq = 3,
-            kind = "session.status",
-            data = buildJsonObject {
-                put("sessionId", "s1")
-                put("running", false)
-            },
-        )
+        val completed = buildJsonObject {
+            put("sessionId", "s1")
+            put("turn", 3)
+            put("reason", "completed")
+        }
+        transport.emitEvent(seq = 101, kind = "turn.completed", data = completed, ts = now)
+        // 同一轮补发/重复到达：只提醒一次。
+        transport.emitEvent(seq = 102, kind = "turn.completed", data = completed, ts = now)
         advanceUntilIdle()
 
         assertEquals(listOf("s1"), completions.map { it.sessionId })
         assertEquals("会话一", completions.single().title)
+        assertEquals(now, completions.single().time)
         testScope.cancel()
     }
 
     @Test
-    fun `idle session going idle again does not emit a completion`() = runTest {
+    fun `turn completed for a session that is not open still notifies`() = runTest {
+        // 在 A 里干活、B 跑完了：仍然要提醒（点通知回到 B）。
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(
+                SessionSummary(id = "s1", title = "正在看的"),
+                SessionSummary(id = "s2", title = "后台跑的"),
+            )
+        }
+        val now = 1_700_000_000_000L
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope, clock = { now })
+        val completions = mutableListOf<SessionCompletion>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            repository.sessionCompletions.collect { completions += it }
+        }
+        repository.connect(endpoint)
+        advanceUntilIdle()
+        transport.emit(StreamUpdate.Ready(ReadyFrame(seq = 100, serverTime = now)))
+        advanceUntilIdle()
+
+        transport.emitEvent(
+            seq = 101,
+            kind = "turn.completed",
+            data = buildJsonObject {
+                put("sessionId", "s2")
+                put("turn", 1)
+                put("reason", "completed")
+            },
+            ts = now,
+        )
+        advanceUntilIdle()
+
+        assertEquals(listOf("s2"), completions.map { it.sessionId })
+        assertEquals("后台跑的", completions.single().title)
+        testScope.cancel()
+    }
+
+    @Test
+    fun `session status flips never emit completions`() = runTest {
+        // 旧实现靠 running true→false 推断完成，这正是「早已结束的对话又响一次」
+        // 的来源：状态是快照，会被重启/补齐/过期状态表重新翻一遍。
         val transport = FakeTransport().apply {
             fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "会话一", running = false))
         }
@@ -258,15 +292,24 @@ class GatewayRepositoryTest {
         repository.connect(endpoint)
         advanceUntilIdle()
 
-        // App 启动/重连时已经是空闲的会话：不能补发「任务完成」。
         transport.emitEvent(
             seq = 1,
+            kind = "session.status",
+            data = buildJsonObject {
+                put("sessionId", "s1")
+                put("running", true)
+            },
+        )
+        transport.emitEvent(
+            seq = 2,
             kind = "session.status",
             data = buildJsonObject {
                 put("sessionId", "s1")
                 put("running", false)
             },
         )
+        // 缺 running 字段的畸形帧同样不能当成「跑完了」。
+        transport.emitEvent(seq = 3, kind = "session.status", data = buildJsonObject { put("sessionId", "s1") })
         advanceUntilIdle()
 
         assertTrue(completions.isEmpty())
@@ -274,12 +317,13 @@ class GatewayRepositoryTest {
     }
 
     @Test
-    fun `replayed status events do not emit stale completions`() = runTest {
+    fun `replayed turn completed is ignored until a live one arrives`() = runTest {
         val transport = FakeTransport().apply {
             fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "会话一"))
         }
+        val now = 1_700_000_000_000L
         val testScope = scope(StandardTestDispatcher(testScheduler))
-        val repository = GatewayRepository(transport, testScope)
+        val repository = GatewayRepository(transport, testScope, clock = { now })
         val completions = mutableListOf<SessionCompletion>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             repository.sessionCompletions.collect { completions += it }
@@ -288,23 +332,16 @@ class GatewayRepositoryTest {
         advanceUntilIdle()
 
         // 连上时 ready.seq = 100：之后补发的 90/91 是历史，不应弹「任务完成」。
-        transport.emit(StreamUpdate.Ready(ReadyFrame(seq = 100)))
+        transport.emit(StreamUpdate.Ready(ReadyFrame(seq = 100, serverTime = now)))
         advanceUntilIdle()
         transport.emitEvent(
             seq = 90,
-            kind = "session.status",
+            kind = "turn.completed",
             data = buildJsonObject {
                 put("sessionId", "s1")
-                put("running", true)
+                put("turn", 4)
             },
-        )
-        transport.emitEvent(
-            seq = 91,
-            kind = "session.status",
-            data = buildJsonObject {
-                put("sessionId", "s1")
-                put("running", false)
-            },
+            ts = now,
         )
         advanceUntilIdle()
         assertTrue(completions.isEmpty())
@@ -312,23 +349,179 @@ class GatewayRepositoryTest {
         // 实时事件（seq > 100）照常提醒。
         transport.emitEvent(
             seq = 101,
-            kind = "session.status",
+            kind = "turn.completed",
             data = buildJsonObject {
                 put("sessionId", "s1")
-                put("running", true)
+                put("turn", 5)
             },
-        )
-        transport.emitEvent(
-            seq = 102,
-            kind = "session.status",
-            data = buildJsonObject {
-                put("sessionId", "s1")
-                put("running", false)
-            },
+            ts = now,
         )
         advanceUntilIdle()
 
         assertEquals(listOf("s1"), completions.map { it.sessionId })
+        testScope.cancel()
+    }
+
+    @Test
+    fun `stale turn completed beyond the freshness window is ignored`() = runTest {
+        // 断线很久后重连，网关会补发这段时间结束的轮次：早就不该再打扰。
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "会话一"))
+        }
+        val now = 1_700_000_000_000L
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope, clock = { now })
+        val completions = mutableListOf<SessionCompletion>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            repository.sessionCompletions.collect { completions += it }
+        }
+        repository.connect(endpoint)
+        advanceUntilIdle()
+        transport.emit(StreamUpdate.Ready(ReadyFrame(seq = 100, serverTime = now)))
+        advanceUntilIdle()
+
+        val completed = buildJsonObject {
+            put("sessionId", "s1")
+            put("turn", 1)
+        }
+        // 10 分钟前结束的那一轮（seq 是新的，但时间戳很旧）。
+        transport.emitEvent(
+            seq = 101,
+            kind = "turn.completed",
+            data = completed,
+            ts = now - 10 * 60_000L,
+        )
+        advanceUntilIdle()
+        assertTrue(completions.isEmpty())
+
+        // 2 分钟内结束的仍然提醒（补发窗口内的「刚跑完」）。
+        transport.emitEvent(
+            seq = 102,
+            kind = "turn.completed",
+            data = buildJsonObject {
+                put("sessionId", "s1")
+                put("turn", 2)
+            },
+            ts = now - 30_000L,
+        )
+        advanceUntilIdle()
+        assertEquals(1, completions.size)
+        testScope.cancel()
+    }
+
+    @Test
+    fun `turn completed while waiting for an answer is not notified`() = runTest {
+        // 等审批/回答时由「提问/授权」通知负责，不再叠一条「任务完成」。
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "会话一"))
+            fakeApi.interventions = listOf(Intervention(eventId = "ev-approval", sessionId = "s1"))
+        }
+        val now = 1_700_000_000_000L
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope, clock = { now })
+        val completions = mutableListOf<SessionCompletion>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            repository.sessionCompletions.collect { completions += it }
+        }
+        repository.connect(endpoint)
+        advanceUntilIdle()
+        transport.emit(StreamUpdate.Ready(ReadyFrame(seq = 100, serverTime = now)))
+        advanceUntilIdle()
+        assertEquals(1, repository.pendingInterventions.value.size)
+
+        transport.emitEvent(
+            seq = 101,
+            kind = "turn.completed",
+            data = buildJsonObject {
+                put("sessionId", "s1")
+                put("turn", 1)
+            },
+            ts = now,
+        )
+        advanceUntilIdle()
+
+        assertTrue(completions.isEmpty())
+        testScope.cancel()
+    }
+
+    @Test
+    fun `subagent and interrupted turns are not notified`() = runTest {
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(
+                SessionSummary(id = "s1", title = "会话一"),
+                SessionSummary(id = "sub-1", title = "子代理", parentSessionId = "s1"),
+            )
+        }
+        val now = 1_700_000_000_000L
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope, clock = { now })
+        val completions = mutableListOf<SessionCompletion>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            repository.sessionCompletions.collect { completions += it }
+        }
+        repository.connect(endpoint)
+        advanceUntilIdle()
+        transport.emit(StreamUpdate.Ready(ReadyFrame(seq = 100, serverTime = now)))
+        advanceUntilIdle()
+
+        // 子会话：载荷标记 + 会话摘要本身都要挡住。
+        transport.emitEvent(
+            seq = 101,
+            kind = "turn.completed",
+            data = buildJsonObject {
+                put("sessionId", "sub-1")
+                put("turn", 1)
+                put("subagent", true)
+            },
+            ts = now,
+        )
+        // 用户按了停止：不是「跑完了」。
+        transport.emitEvent(
+            seq = 102,
+            kind = "turn.completed",
+            data = buildJsonObject {
+                put("sessionId", "s1")
+                put("turn", 1)
+                put("reason", "aborted")
+            },
+            ts = now,
+        )
+        advanceUntilIdle()
+
+        assertTrue(completions.isEmpty())
+        testScope.cancel()
+    }
+
+    @Test
+    fun `a gateway without the turn capability warns once, not on every reconnect`() = runTest {
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "T"))
+        }
+        val now = 1_700_000_000_000L
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope, clock = { now })
+        repository.connect(endpoint)
+        advanceUntilIdle()
+        val notices = watchNotices(repository)
+
+        // 旧网关：snapshot 没有 capabilities ⇒ 提示一次升级。
+        transport.emit(StreamUpdate.Ready(ReadyFrame(seq = 10, serverTime = now)))
+        transport.emit(StreamUpdate.Ready(ReadyFrame(seq = 11, serverTime = now)))
+        advanceUntilIdle()
+        assertEquals(1, notices.count { it.text.contains("版本较旧") })
+
+        // 新网关（带能力）：不再提示。
+        transport.emit(
+            StreamUpdate.Ready(
+                ReadyFrame(
+                    seq = 12,
+                    serverTime = now,
+                    snapshot = Snapshot(capabilities = listOf(GatewayRepository.CAPABILITY_TURN_COMPLETED)),
+                ),
+            ),
+        )
+        advanceUntilIdle()
+        assertEquals(1, notices.count { it.text.contains("版本较旧") })
         testScope.cancel()
     }
 

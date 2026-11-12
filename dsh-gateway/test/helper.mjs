@@ -157,23 +157,42 @@ export function makeCtx(options) {
       return undefined
     },
   }
+  /**
+   * Cordis-style event bus: `ctx.on(name, handler)` registers, `ctx.emit(name, …)`
+   * dispatches. Tests drive host events (`session/event`, `subagent/start`, …)
+   * through `ctx.emit`; the plugin under test only ever uses `ctx.on`.
+   * @type {Map<string, Set<Function>>}
+   */
+  const listeners = new Map()
   return {
     webServer,
     connection,
     routes,
+    listeners,
     logger: options.logger,
     effect: (factory) => {
       const dispose = typeof factory === 'function' ? factory() : undefined
       return typeof dispose === 'function' ? dispose : () => {}
     },
-    on() {
-      return () => {}
+    on(name, handler) {
+      if (typeof name !== 'string' || typeof handler !== 'function') return () => {}
+      const set = listeners.get(name) ?? new Set()
+      set.add(handler)
+      listeners.set(name, set)
+      return () => {
+        set.delete(handler)
+        if (set.size === 0 && listeners.get(name) === set) listeners.delete(name)
+      }
     },
     get(name) {
       if (name === 'connection') return connection
       return undefined
     },
-    emit() {},
+    emit(name, ...args) {
+      const set = listeners.get(name)
+      if (set === undefined) return
+      for (const handler of [...set]) handler(...args)
+    },
   }
 }
 

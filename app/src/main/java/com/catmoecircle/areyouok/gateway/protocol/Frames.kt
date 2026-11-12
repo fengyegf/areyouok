@@ -40,6 +40,13 @@ data class Snapshot(
     val workspaces: List<Workspace> = emptyList(),
     val sessions: List<SessionSummary> = emptyList(),
     val pending: List<Intervention> = emptyList(),
+    /**
+     * 网关能力清单（如 `turn.completed`）。
+     *
+     * 旧网关没有这个字段（= 空列表）：APK 据此提示「升级网关」，避免
+     * 每轮结束提醒静默失效。
+     */
+    val capabilities: List<String> = emptyList(),
 )
 
 @Serializable
@@ -95,6 +102,14 @@ data class EventFrame(
     val id: String? = null,
     val topic: String? = null,
     val kind: String = "",
+    /**
+     * 事件在**网关**侧的发布时刻（epoch ms），补发时保持原值。
+     *
+     * 用来判断「这件事刚刚发生」还是「断线补齐的历史」：网关重启后 seq 会从头
+     * 计，只靠 seq 分不清新旧，这时用时间戳兜底（见 `GatewayRepository` 的
+     * 新鲜度窗口，配合 `ready.serverTime` 校正时钟）。
+     */
+    val ts: Long? = null,
     val data: JsonObject = JsonObject(emptyMap()),
 ) : StreamFrame
 
@@ -107,6 +122,14 @@ enum class EventKind(val wire: String) {
     MESSAGE_DELTA("message.delta"),
     TURN_START("turn.start"),
     TURN_END("turn.end"),
+    /**
+     * 一轮对话结束（`lib/turns.js` 订阅宿主 `turn/end` 后广播）。
+     *
+     * 与 [TURN_END] 的区别：[TURN_END] 是当前订阅会话的日志事件（用于收尾流式
+     * 消息），只有设备跟随了该会话才收得到；[TURN_COMPLETED] 是**全局**事实，
+     * 所有会话每轮一条，专门给「每轮结束提醒」用。
+     */
+    TURN_COMPLETED("turn.completed"),
     TOOL_CALL("tool.call"),
     TOOL_RESULT("tool.result"),
     APPROVAL_REQUEST("approval.request"),
