@@ -157,6 +157,36 @@ class MessageMappingTest {
     }
 
     @Test
+    fun `dsh-ops step tail plugin context is hidden`() {
+        // 真机 bug：batching-guidance 每跑一步注入一条 `[Plugin context from "…";…]`，
+        // source.kind = dsh-ops:step-tail。之前按「未知来源 = 系统通知」显示，
+        // 时间线里出现大片灰字，正常对话被淹。
+        val context = message(
+            "[Plugin context from \"batching-guidance\"; not a user instruction or authorization.]\n" +
+                "BLOCKING REQUIREMENT: batch your tool calls.",
+            MessageSource(kind = "dsh-ops:step-tail"),
+        )
+        assertNull(MessageMapping.userRole(context))
+        // dsh-ops 以后新增的注入 kind 也走前缀隐藏。
+        assertNull(
+            MessageMapping.userRole(
+                message("some future ops context", MessageSource(kind = "dsh-ops:future-kind")),
+            ),
+        )
+    }
+
+    @Test
+    fun `plugin context text is hidden without a source too`() {
+        // 旧网关不带 source：仍按正文包裹前缀兜底。
+        assertNull(
+            MessageMapping.userRole(
+                message("[Plugin context from \"batching-guidance\"; not a user instruction or authorization.]\n…"),
+            ),
+        )
+        assertTrue(with(MessageMapping) { "[Plugin context from x".isPluginContextText() })
+    }
+
+    @Test
     fun `unknown source kind is shown as a system notice`() {
         // 新来源类型宁可显示灰字通知，也绝不冒充用户消息。
         assertEquals(
