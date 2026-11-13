@@ -214,4 +214,8 @@
     <string name="composer_full_access_ack">我已了解风险，并愿意继续</string>
     <string name="composer_full_access_confirm">启用完全权限</string>
     <string name="composer_cancel">取消</string>
+
+    <!-- 工具结果里的文件路径（DSH <path>/<type>/<content> 信封） -->
+    <string name="gateway_tool_file">文件</string>
+    <string name="gateway_tool_image">图片</string>
 </resources>

@@ -70,7 +70,11 @@ class MessageAssembler {
             call.text.isBlank()
         val resultRow = result.role == ChatRole.TOOL && result.meta == null
         if (!awaitingResult || !resultRow) return
-        items[callIndex] = call.copy(text = result.text)
+        items[callIndex] = call.copy(
+            text = result.text,
+            toolPath = result.toolPath,
+            toolType = result.toolType,
+        )
         items.removeAt(resultIndex)
     }
 
@@ -225,17 +229,25 @@ class MessageAssembler {
         /** 工具结果里的图片（`read_image` 之类）：只存引用，显示时按需预览。 */
         images: List<MessageImage> = emptyList(),
     ): Boolean {
+        // 工具结果正文可能带 <path>/<type>/<content> 信封（DSH 把输出落盘路径写在正文里）：
+        // 先解析，正文只留 content，路径/类型单独存字段，卡片展开时展示。
+        val parsed = summary?.let { parseToolResultEnvelope(it) }
+        val resultText = parsed?.content
+        val resultPath = parsed?.path
+        val resultType = parsed?.type
         if (callId != null) {
             val existing = items.indexOfLast { it.role == ChatRole.TOOL && it.callId == callId }
             if (existing >= 0) {
                 val current = items[existing]
                 items[existing] = current.copy(
-                    text = summary?.takeIf { it.isNotBlank() } ?: current.text,
+                    text = resultText?.takeIf { it.isNotBlank() } ?: current.text,
                     meta = toolName ?: current.meta,
                     seq = seq ?: current.seq,
                     arguments = arguments ?: current.arguments,
                     running = running,
                     images = if (images.isNotEmpty()) images else current.images,
+                    toolPath = resultPath ?: current.toolPath,
+                    toolType = resultType ?: current.toolType,
                 )
                 return false
             }
@@ -246,12 +258,14 @@ class MessageAssembler {
             if (existing >= 0) {
                 val current = items[existing]
                 items[existing] = current.copy(
-                    text = summary?.takeIf { it.isNotBlank() } ?: current.text,
+                    text = resultText?.takeIf { it.isNotBlank() } ?: current.text,
                     meta = toolName ?: current.meta,
                     callId = callId ?: current.callId,
                     arguments = arguments ?: current.arguments,
                     running = running,
                     images = if (images.isNotEmpty()) images else current.images,
+                    toolPath = resultPath ?: current.toolPath,
+                    toolType = resultType ?: current.toolType,
                 )
                 return false
             }
@@ -266,16 +280,18 @@ class MessageAssembler {
             if (pending >= 0) {
                 val current = items[pending]
                 items[pending] = current.copy(
-                    text = summary?.takeIf { it.isNotBlank() } ?: current.text,
+                    text = resultText?.takeIf { it.isNotBlank() } ?: current.text,
                     meta = toolName ?: current.meta,
                     seq = seq ?: current.seq,
                     arguments = arguments ?: current.arguments,
                     running = running,
+                    toolPath = resultPath ?: current.toolPath,
+                    toolType = resultType ?: current.toolType,
                 )
                 return false
             }
         }
-        val text = summary?.takeIf { it.isNotBlank() }
+        val text = resultText?.takeIf { it.isNotBlank() }
             ?: toolName?.takeIf { it.isNotBlank() }
             ?: "工具调用"
         items += ChatMessage(
@@ -288,6 +304,29 @@ class MessageAssembler {
             arguments = arguments,
             running = running,
             images = images,
+            toolPath = resultPath,
+            toolType = resultType,
+        )
+        return true
+    }
+
+    /**
+     * 把 PTC 模式注入的工具结果信封（`<path>` / `<type>`）并回最近一条工具行。
+     *
+     * 真机现象：工具返回图片/文件时，DSH 会把 `<path>…</path><type>image</type>`
+     * 作为一条新的 user 消息注入给模型；旧实现把它当系统灰字原样显示，正文里
+     * 漏出尖括号标签。它描述的其实是一次工具调用的产物，应当归到「工具」行。
+     *
+     * @return 是否找到并更新了工具行；没有工具行时返回 false（调用方丢弃这条消息）。
+     */
+    fun attachToolEnvelope(path: String?, type: String?): Boolean {
+        if (path.isNullOrBlank() && type.isNullOrBlank()) return false
+        val index = items.indexOfLast { it.role == ChatRole.TOOL }
+        if (index < 0) return false
+        val current = items[index]
+        items[index] = current.copy(
+            toolPath = path ?: current.toolPath,
+            toolType = type ?: current.toolType,
         )
         return true
     }

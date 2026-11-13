@@ -26,6 +26,11 @@ internal object MessageMapping {
         "time-context",
         "user-approval",
         "compact-checkpoint",
+        // PTC 模式把工具返回的图片/文件内容作为 user 消息送给模型
+        // （`<path>…</path><type>image</type><content>…</content>`）：
+        // 它是模型侧上下文，不是聊天内容；Repository/History 会先尝试并进上一条
+        // 工具行（工具栏），并进不去时按这里直接丢弃。
+        "ptc-mode",
         // 工作区指令（AGENTS.md / CLAUDE.md）：随每轮注入的 `<system-reminder>`，
         // 只是给模型的上下文。真机 bug：漏在 SYSTEM 灰字行里，像一条系统通知。
         "agent-instructions",
@@ -50,6 +55,9 @@ internal object MessageMapping {
 
     /** dsh-ops 插件上下文的正文包裹前缀。 */
     private const val PLUGIN_CONTEXT_PREFIX = "[Plugin context from "
+
+    /** PTC 模式把工具结果作为 user 消息注入时的 source.kind。 */
+    private const val PTC_SOURCE_KIND = "ptc-mode"
 
     /** DSH 注入模型侧上下文的固定包裹标签。 */
     private const val SYSTEM_REMINDER_TAG = "<system-reminder>"
@@ -109,6 +117,12 @@ internal object MessageMapping {
 
     /** 文本是否为 `<system-reminder>` 包裹的模型侧上下文。 */
     fun String.isSystemReminderText(): Boolean = trimStart().startsWith(SYSTEM_REMINDER_TAG)
+
+    /** PTC 模式注入的「工具结果正文」user 消息（图片/文件信封，模型侧上下文）。 */
+    fun isPtcContext(message: Message): Boolean = message.source?.kind == PTC_SOURCE_KIND
+
+    /** 旧网关不带 source 时的兜底：正文以 `<path>` 信封开头。 */
+    fun isToolEnvelopeText(text: String): Boolean = text.trimStart().startsWith("<path>")
 
     /** 文本是否为 dsh-ops 插件注入的 `[Plugin context from "…"; …]` 上下文。 */
     fun String.isPluginContextText(): Boolean = trimStart().startsWith(PLUGIN_CONTEXT_PREFIX)

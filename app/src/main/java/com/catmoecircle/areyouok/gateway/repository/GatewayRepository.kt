@@ -468,6 +468,19 @@ class GatewayRepository(
             EventKind.MESSAGE_USER -> {
                 val message = decodeMessage(data) ?: return
                 if (!isSelected(sessionId)) return
+                // PTC 模式把工具结果（`<path>…</path><type>image</type>` 信封）作为
+                // user 消息注入：这不是聊天内容，并回最近一条工具行（聊天里的「工具」卡片），
+                // 否则正文会漏出尖括号标签（真机现象）。
+                if (MessageMapping.isPtcContext(message) ||
+                    (message.source?.kind != "user" && MessageMapping.isToolEnvelopeText(message.text))
+                ) {
+                    val envelope = parseToolResultEnvelope(message.text)
+                    if (envelope.hadEnvelope) {
+                        assembler.attachToolEnvelope(envelope.path, envelope.type)
+                        publishMessages()
+                    }
+                    return
+                }
                 // DSH 会把运行时上下文 / system-reminder / 后台任务完成通知等机器内容
                 // 以 user 消息落盘。按 `source.kind` 分类：真人消息才进用户气泡，
                 // 系统通知进灰色提示行，纯上下文直接丢弃（详见 MessageMapping）。

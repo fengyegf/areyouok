@@ -77,6 +77,7 @@ import androidx.compose.ui.unit.sp
 import com.catmoecircle.areyouok.R
 import com.catmoecircle.areyouok.gateway.repository.ChatMessage
 import com.catmoecircle.areyouok.gateway.repository.ChatRole
+import com.catmoecircle.areyouok.gateway.repository.toolPathFileName
 import com.catmoecircle.areyouok.ui.gateway.markdown.MarkdownText
 import com.catmoecircle.areyouok.ui.settings.WorkStepCollapseTiming
 import com.catmoecircle.areyouok.ui.settings.WorkStepDisplay
@@ -788,6 +789,16 @@ private fun ToolStepRow(message: ChatMessage, level: WorkStepDisplay, live: Bool
     val colorScheme = MaterialTheme.colorScheme
     val toolName = message.meta?.takeIf { it.isNotBlank() }
     val output = message.text.takeIf { it.isNotBlank() && it != message.meta }
+    // 工具结果信封（<path>/<type>/<content>）已在仓储层解析：这里只消费解析后的字段。
+    val toolPath = message.toolPath?.trim()?.takeIf { it.isNotEmpty() }
+    val isImageResult = message.toolType?.trim()?.equals("image", ignoreCase = true) == true
+    val fileName = toolPathFileName(toolPath)
+    val imageLabel = stringResource(R.string.gateway_tool_image)
+    val sessionId = LocalImageSessionId.current
+    // 图片信封的路径交给网关现场读；取不到图就不画，不影响输出文本。
+    val previewUrl = remember(toolPath, isImageResult, sessionId) {
+        if (isImageResult) markdownImageUrl(toolPath.orEmpty(), sessionId) else null
+    }
     // key 里带上档位：切换「工作步骤展示」后按新档位重新取默认展开态，
     // 避免 LazyColumn 的 SaveableStateHolder 把上一档的展开状态张冠李戴。
     var expanded by rememberSaveable(
@@ -804,11 +815,23 @@ private fun ToolStepRow(message: ChatMessage, level: WorkStepDisplay, live: Bool
         stringResource(R.string.gateway_tool_call)
     }
 
+    // 收起态摘要：优先文件名（image 结果再标出「图片」），没有路径时至少标出类型。
+    val hint = if (level.showsRowHint) {
+        when {
+            fileName != null && isImageResult -> "$fileName · $imageLabel"
+            fileName != null -> fileName
+            isImageResult -> imageLabel
+            else -> null
+        }
+    } else {
+        null
+    }
+
     StepRow(
         shape = ToolCardShape,
         label = label,
         labelColor = colorScheme.onSurface,
-        hint = null,
+        hint = hint,
         streaming = live && message.running,
         streamingText = stringResource(R.string.gateway_tool_running),
         expanded = expanded,
@@ -816,7 +839,6 @@ private fun ToolStepRow(message: ChatMessage, level: WorkStepDisplay, live: Bool
     ) {
         // 只有展开时才做 JSON 美化：折叠状态下大参数不占主线程。
         val arguments = remember(message.arguments) { formatArguments(message.arguments) }
-        val sessionId = LocalImageSessionId.current
         SelectionContainer {
             Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 for (image in message.images) {
@@ -826,6 +848,28 @@ private fun ToolStepRow(message: ChatMessage, level: WorkStepDisplay, live: Bool
                         maxWidth = 300.dp,
                         maxHeight = 420.dp,
                     )
+                }
+                if (toolPath != null) {
+                    Text(
+                        text = stringResource(R.string.gateway_tool_file),
+                        color = colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp,
+                    )
+                    Text(
+                        text = toolPath,
+                        color = colorScheme.onSurface,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.5.sp,
+                        lineHeight = 17.sp,
+                    )
+                    if (previewUrl != null) {
+                        RemoteImage(
+                            url = previewUrl,
+                            contentDescription = fileName,
+                            maxWidth = 300.dp,
+                            maxHeight = 420.dp,
+                        )
+                    }
                 }
                 if (!arguments.isNullOrBlank()) {
                     Text(
@@ -843,7 +887,9 @@ private fun ToolStepRow(message: ChatMessage, level: WorkStepDisplay, live: Bool
                     )
                     CodeSurface(text = output)
                 }
-                if (arguments.isNullOrBlank() && output.isNullOrBlank() && message.images.isEmpty()) {
+                if (arguments.isNullOrBlank() && output.isNullOrBlank() &&
+                    message.images.isEmpty() && toolPath == null
+                ) {
                     Text(
                         text = stringResource(R.string.gateway_tool_running),
                         color = colorScheme.onSurfaceVariant,

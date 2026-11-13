@@ -64,6 +64,10 @@ data class ChatMessage(
     val callId: String? = null,
     /** 工具调用参数（JSON 文本），展开工具行时展示。 */
     val arguments: String? = null,
+    /** 工具结果信封（<path> 标签）里的文件路径，展开工具行时展示「文件」。 */
+    val toolPath: String? = null,
+    /** 工具结果信封（<type> 标签）里的输出类型，如 image。 */
+    val toolType: String? = null,
     /** 工具已派发、结果尚未返回：工作步骤标题据此显示「正在运行命令」等实时状态。 */
     val running: Boolean = false,
     /**
