@@ -60,6 +60,10 @@ const OPEN_TIMEOUT_MS = 15_000
 const FILE_TIMEOUT_MS = 20_000
 /** Hard cap for one host file read (bytes); the gateway preview route uses it too. */
 const MAX_HOST_FILE_BYTES = 16 * 1024 * 1024
+/** 上传一个文件到宿主时的整体超时：大文件经局域网转发可能要几十秒。 */
+const UPLOAD_TIMEOUT_MS = 120_000
+/** 宿主接收原始字节的认证路由（由 dsh-client-file-upload 注册）。 */
+const UPLOAD_ENDPOINT = 'session/uploadFileBinary'
 const WATCHDOG_INTERVAL_MS = 5_000
 /** 没收到过 DSH ping 时的保守空闲阈值（mock/静默链路）。 */
 const WATCHDOG_IDLE_MS = 60_000
@@ -632,6 +636,103 @@ export class DshLoopbackClient {
       if (error?.name === 'AbortError') throw new DshCallError('aborted', 'api/file', 'DSH request was aborted')
       if (error?.name === 'TimeoutError') throw new DshCallError('timeout', 'api/file', 'DSH request timed out')
       throw new DshCallError('transport_error', 'api/file', `DSH request failed: ${error?.message ?? error}`)
+    }
+  }
+
+  /**
+   * 把一份文件字节交给宿主（`POST /api/session/uploadFileBinary`），拿回可供后续
+   * prompt 引用的回执。
+   *
+   * 宿主按 `sessionId` 决定归属：回执只能在**同一个会话**的 prompt 里使用。带
+   * `mediaType`（image/png 等）时宿主按图片归一化，回执最终会落成 image part；
+   * 不带时原样存字节，prompt 里成为 file part（模型按 read-only 路径自行读取）。
+   *
+   * @param {string} sessionId - 接收这条 prompt 的普通会话。
+   * @param {{bytes:Buffer|Uint8Array, name?:string, mediaType?:string, signal?:AbortSignal, timeoutMs?:number}} input
+   * @returns {Promise<{receiptId:string, file?:object, image?:object}>}
+   * @throws {DshCallError}
+   */
+  async uploadFile(sessionId, input = {}) {
+    const id = typeof sessionId === 'string' ? sessionId.trim() : ''
+    if (id === '') throw new DshCallError('invalid_request', UPLOAD_ENDPOINT, 'sessionId is required')
+    const bytes = input?.bytes
+    const length = typeof bytes?.byteLength === 'number' ? bytes.byteLength : -1
+    if (length <= 0) throw new DshCallError('invalid_request', UPLOAD_ENDPOINT, 'file bytes are required')
+    const params = new URLSearchParams({ sessionId: id })
+    const name = typeof input.name === 'string' ? input.name.trim() : ''
+    if (name !== '') params.set('name', name)
+    const mediaType = typeof input.mediaType === 'string' ? input.mediaType.trim().toLowerCase() : ''
+    if (mediaType !== '') params.set('mediaType', mediaType)
+    const endpoint = `${UPLOAD_ENDPOINT}?${params.toString()}`
+    const signal = this._composeSignal(
+      input.signal,
+      Number(input.timeoutMs) > 0 ? Number(input.timeoutMs) : UPLOAD_TIMEOUT_MS,
+    )
+
+    let cookie = await this.ensureCookie()
+    let response = await this._postBytes(endpoint, cookie, bytes, signal)
+    if (response.status === 401) {
+      this._log('warn', `${UPLOAD_ENDPOINT}: 401 from DSH, refreshing cookie and retrying once`)
+      cookie = await this.refreshCookie()
+      response = await this._postBytes(endpoint, cookie, bytes, signal)
+    }
+
+    let text = ''
+    try {
+      text = await response.text()
+    } catch {
+      text = ''
+    }
+    let body = null
+    if (text !== '') {
+      try {
+        body = JSON.parse(text)
+      } catch {
+        body = null
+      }
+    }
+    const ok = response.status >= 200 && response.status < 300
+    const failure = body?.error
+    if (!ok || body?.ok !== true) {
+      const code = failure?.code ?? httpErrorCode(response.status)
+      throw new DshCallError(
+        String(code),
+        UPLOAD_ENDPOINT,
+        failure?.message ?? `HTTP ${response.status}`,
+        failure,
+      )
+    }
+    const value = body.value
+    const receiptId = typeof value?.receiptId === 'string' ? value.receiptId : ''
+    if (receiptId === '') {
+      throw new DshCallError('invalid_response', UPLOAD_ENDPOINT, 'the DSH returned no upload receipt')
+    }
+    return {
+      receiptId,
+      ...(value?.file === undefined ? {} : { file: value.file }),
+      ...(value?.image === undefined ? {} : { image: value.image }),
+    }
+  }
+
+  /** 发一次认证的原始字节 POST（上传通道；失败统一映射为 DshCallError）。 */
+  async _postBytes(endpoint, cookie, bytes, signal) {
+    const fetchImpl = this._requireFetch()
+    const init = {
+      method: 'POST',
+      headers: {
+        cookie,
+        'content-type': 'application/octet-stream',
+        accept: 'application/json',
+      },
+      body: bytes,
+    }
+    if (signal !== undefined) init.signal = signal
+    try {
+      return await fetchImpl(`${this.origin}/api/${endpoint}`, init)
+    } catch (error) {
+      if (error?.name === 'AbortError') throw new DshCallError('aborted', UPLOAD_ENDPOINT, 'DSH upload was aborted')
+      if (error?.name === 'TimeoutError') throw new DshCallError('timeout', UPLOAD_ENDPOINT, 'DSH upload timed out')
+      throw new DshCallError('transport_error', UPLOAD_ENDPOINT, `DSH upload failed: ${error?.message ?? error}`)
     }
   }
 

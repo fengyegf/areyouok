@@ -109,7 +109,10 @@ GET  /v1/sessions?workspaceId=          会话列表（默认过滤 subagent；?
 POST /v1/sessions                       新建会话
 GET  /v1/sessions/{id}/state            运行/待输入状态
 GET  /v1/sessions/{id}/messages         历史消息分页
-POST /v1/sessions/{id}/messages         发送消息 {text,mode:"queue"|"steer"}
+POST /v1/sessions/{id}/messages         发送消息 {text?,mode:"queue"|"steer",files?:[receiptId | {receiptId}]}
+POST /v1/sessions/{id}/files?name=&mediaType=
+                                        上传一个文件（application/octet-stream），换回可被
+                                        下一条消息引用的回执；带 mediaType=image/png 时按图片入库
 GET  /v1/sessions/{id}/attachments/{attId}?mediaType=&width=&height=&bytes=&name=
                                         按需预览一张会话图片（宿主存储，不落盘）
 GET  /v1/sessions/{id}/image?path=      按需预览 PC 上的一张图片文件（绝对路径或相对会话目录，仅图片扩展名）

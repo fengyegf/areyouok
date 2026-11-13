@@ -42,14 +42,14 @@ import {
   formatHost,
   pairingUri,
 } from './panel.js'
-import { imagesOfContent } from './normalize.js'
+import { filesOfContent, imagesOfContent } from './normalize.js'
 import { formatFingerprint } from './tls.js'
 
 /** DSH version this plugin was verified against. */
 export const DSH_VERSION = '0.2.2-rc.1'
 
 /** Gateway package version (kept in sync with package.json by hand). */
-export const GATEWAY_VERSION = '0.2.0'
+export const GATEWAY_VERSION = '0.2.1'
 
 /** `/v1` protocol version. */
 export const PROTOCOL_VERSION = 1
@@ -69,8 +69,8 @@ const MAX_MESSAGE_LIMIT = 200
 /** Preset value shape accepted by `/v1/sessions/{id}/permission` (`[a-z0-9-]+`). */
 const PRESET_VALUE_PATTERN = /^[a-z0-9-]+$/
 
-/** Stored-image attachment ids are opaque tokens; reject path-ish characters. */
-const ATTACHMENT_ID_PATTERN = /^[A-Za-z0-9._-]{1,200}$/
+/** Stored-image attachment ids are opaque tokens; reject path-ish characters. Real DSH ids are `sha256:<hex>`, so `:` must stay allowed. */
+const ATTACHMENT_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/
 
 /** Media types the preview route will echo back (anything else is refused). */
 const IMAGE_MEDIA_TYPE_PATTERN = /^image\/[a-z0-9.+-]{1,64}$/i
@@ -89,6 +89,15 @@ const PREVIEW_IMAGE_TYPES = new Map([
 /** Upper bound for one preview read (bytes). */
 const MAX_PREVIEW_BYTES = 16 * 1024 * 1024
 
+/** Upper bound for one upload the gateway buffers before handing it to DSH. */
+const MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+
+/** Hard cap on how many files one prompt may cite. */
+const MAX_FILES_PER_MESSAGE = 16
+
+/** Staged upload receipts are opaque host tokens; reject anything path-ish. */
+const RECEIPT_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/
+
 /** @returns {boolean} 是否为普通对象（非数组、非 null）。 */
 function isRecord(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -104,6 +113,7 @@ const ROUTES = [
   ['GET', /^\/v1\/sessions\/([^/]+)\/state$/, 'sessionState'],
   ['GET', /^\/v1\/sessions\/([^/]+)\/messages$/, 'messagesList'],
   ['POST', /^\/v1\/sessions\/([^/]+)\/messages$/, 'messagesSend'],
+  ['POST', /^\/v1\/sessions\/([^/]+)\/files$/, 'fileUpload'],
   ['GET', /^\/v1\/sessions\/([^/]+)\/attachments\/([^/]+)$/, 'attachment'],
   ['GET', /^\/v1\/sessions\/([^/]+)\/image$/, 'sessionImage'],
   ['POST', /^\/v1\/sessions\/([^/]+)\/interrupt$/, 'sessionInterrupt'],
@@ -139,6 +149,77 @@ function decodeSegment(value) {
   } catch {
     throw new HttpError(400, 'invalid_request', 'malformed path parameter')
   }
+}
+
+/**
+ * Read one raw binary request body.
+ *
+ * Uploads are the only `/v1` route that carries bytes instead of JSON, so this
+ * mirrors `readJsonBody` (same 400/413 mapping) without parsing anything.
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @param {number} [limit] - byte cap.
+ * @returns {Promise<Buffer>}
+ * @throws {HttpError} 400 `invalid_request` / 413 `payload_too_large`.
+ */
+function readRawBody(req, limit = MAX_UPLOAD_BYTES) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let size = 0
+    let settled = false
+    const fail = (error) => {
+      if (settled) return
+      settled = true
+      req.removeAllListeners('data')
+      req.removeAllListeners('end')
+      req.removeAllListeners('error')
+      reject(error)
+    }
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > limit) {
+        fail(new HttpError(413, 'payload_too_large', 'request body too large'))
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      if (settled) return
+      settled = true
+      resolve(Buffer.concat(chunks))
+    })
+    req.on('error', (error) => fail(new HttpError(400, 'invalid_request', error?.message)))
+  })
+}
+
+/**
+ * Normalize the `files` array of a send body into staged receipt ids.
+ *
+ * Two shapes are accepted so clients can keep their JSON small: a plain string
+ * (the receipt id) or `{receiptId}` (`{"files":[{"receiptId":"…"}]}`). Unknown
+ * shapes are rejected instead of silently dropping the user's attachment.
+ *
+ * @param {unknown} value - `files` / `attachments` from the request body.
+ * @returns {string[]} distinct receipt ids in request order.
+ * @throws {HttpError} 400 `invalid_request`.
+ */
+function receiptIdsOf(value) {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) throw new HttpError(400, 'invalid_request', 'files must be an array')
+  if (value.length > MAX_FILES_PER_MESSAGE) {
+    throw new HttpError(400, 'invalid_request', `at most ${MAX_FILES_PER_MESSAGE} files per message`)
+  }
+  const ids = []
+  for (const item of value) {
+    const receiptId = typeof item === 'string'
+      ? item.trim()
+      : isRecord(item) && typeof item.receiptId === 'string' ? item.receiptId.trim() : ''
+    if (!RECEIPT_ID_PATTERN.test(receiptId)) {
+      throw new HttpError(400, 'invalid_request', 'each file needs a valid receiptId')
+    }
+    if (!ids.includes(receiptId)) ids.push(receiptId)
+  }
+  return ids
 }
 
 /**
@@ -220,6 +301,19 @@ function withImages(message, content) {
 }
 
 /**
+ * Attach the `files` array to a `/v1` message when the content has stored file
+ * attachments (files the user attached to their prompt).
+ *
+ * Each entry is the durable `FileAttachmentRef` DSH keeps in the session
+ * record; the client only needs the display name and byte count.
+ */
+function withFiles(message, content) {
+  const files = filesOfContent(content)
+  if (files.length > 0) message.files = files
+  return message
+}
+
+/**
  * Map one DSH session event (`{type, seq, time, data}`) to a `/v1` message.
  * @returns {{seq:number, role:string, text:string, time:number, kind:string}|null}
  */
@@ -234,7 +328,7 @@ export function recordToMessage(record) {
   const time = Number.isFinite(event.time) ? Math.trunc(event.time) : 0
   switch (type) {
     case 'user/message':
-      return withImages({
+      return withFiles(withImages({
         seq,
         role: 'user',
         text: textOfContent(data.content),
@@ -242,7 +336,7 @@ export function recordToMessage(record) {
         kind: 'message',
         // 只透传来源标记（kind/summary/…），客户端用它区分真人消息与机器注入。
         ...(isRecord(data.source) ? { source: data.source } : {}),
-      }, data.content)
+      }, data.content), data.content)
     case 'assistant/message': {
       const content = data.message?.content ?? data.content
       return withImages(withReasoning({
@@ -296,21 +390,21 @@ function hubCachedMessage(item) {
     const kind = typeof item.kind === 'string' && item.kind !== 'message.user' && item.kind !== 'message.assistant'
       ? item.kind
       : 'message'
-    return withImages({
+    return withFiles(withImages({
       seq: Number.isFinite(item.seq) ? Math.trunc(item.seq) : 0,
       role: item.role,
       text: typeof item.text === 'string' ? item.text : '',
       time: Number.isFinite(item.time) ? Math.trunc(item.time) : 0,
       kind,
       ...(isRecord(item.message?.source) ? { source: item.message.source } : {}),
-    }, item.message?.content)
+    }, item.message?.content), item.message?.content)
   }
   const kind = typeof item.kind === 'string' ? item.kind : ''
   const data = item.data !== null && typeof item.data === 'object' ? item.data : null
   if (data === null) return null
   if (kind === 'message.user') {
     const content = data.message?.content ?? data.content
-    return withImages({
+    return withFiles(withImages({
       seq: Number.isFinite(item.seq) ? Math.trunc(item.seq) : 0,
       role: 'user',
       text: textOfContent(content),
@@ -319,7 +413,7 @@ function hubCachedMessage(item) {
       ...(isRecord(data.message?.source)
         ? { source: data.message.source }
         : isRecord(data.source) ? { source: data.source } : {}),
-    }, content)
+    }, content), content)
   }
   if (kind === 'message.assistant') {
     const content = data.message?.content ?? data.content
@@ -1045,16 +1139,68 @@ export class ApiServer {
     writeBinary(res, 200, file.bytes, contentType)
   }
 
+  /**
+   * `POST /v1/sessions/{id}/messages`
+   *
+   * Body: `{text?, mode?, files?: [receiptId | {receiptId}]}`. `files` are the
+   * receipts minted by the upload route **for this same session**; the DSH
+   * prompt cites them as `{type:'file', receiptId}` content parts and the host
+   * resolves them back into the stored attachments (uploaded images become
+   * image parts). Either `text` or at least one file is required.
+   */
   async hMessagesSend({ req, res, params }) {
     const sessionId = decodeSegment(params[0])
     const body = await readJsonBody(req, BODY_LIMIT)
     const text = typeof body.text === 'string' ? body.text : ''
-    if (text.trim() === '') throw new HttpError(400, 'invalid_request', 'text is required')
+    const receiptIds = receiptIdsOf(body.files ?? body.attachments)
+    if (text.trim() === '' && receiptIds.length === 0) {
+      throw new HttpError(400, 'invalid_request', 'text or files are required')
+    }
     const mode = body.mode === 'steer' ? 'steer' : 'queue'
-    // Strict DSH codec: only whitelisted fields, `content` must be text blocks.
-    const args = { requestId: uuid(), sessionId, mode, content: [{ type: 'text', text }] }
+    // Strict DSH codec: only whitelisted fields; text blocks must be non-empty.
+    const content = []
+    if (text.trim() !== '') content.push({ type: 'text', text })
+    for (const receiptId of receiptIds) content.push({ type: 'file', receiptId })
+    const args = { requestId: uuid(), sessionId, mode, content }
     const value = await this.#dsh().call('session/prompt', { request: args })
     writeJson(res, 200, { ok: true, sessionId, accepted: value?.accepted !== false })
+  }
+
+  /**
+   * `POST /v1/sessions/{id}/files?name=<filename>[&mediaType=image/png]`
+   *
+   * Raw bytes (`content-type: application/octet-stream`) are handed straight to
+   * the host's staged-upload route; the gateway stores nothing itself. The
+   * returned receipt can be cited once by `POST /v1/sessions/{id}/messages`.
+   */
+  async hFileUpload({ req, res, url, params }) {
+    const sessionId = decodeSegment(params[0])
+    const contentType = String(req.headers?.['content-type'] ?? '')
+      .split(';', 1)[0].trim().toLowerCase()
+    if (contentType !== 'application/octet-stream') {
+      throw new HttpError(415, 'unsupported_type', 'content-type must be application/octet-stream')
+    }
+    const declared = intParam(req.headers?.['content-length'], 0, 0)
+    if (declared > MAX_UPLOAD_BYTES) {
+      throw new HttpError(413, 'payload_too_large', 'the file is too large for the gateway')
+    }
+    const name = cleanName(url.searchParams.get('name') ?? '', '')
+    const mediaType = String(url.searchParams.get('mediaType') ?? '').trim().toLowerCase()
+    if (mediaType !== '' && !IMAGE_MEDIA_TYPE_PATTERN.test(mediaType)) {
+      throw new HttpError(400, 'invalid_request', 'malformed mediaType')
+    }
+    const bytes = await readRawBody(req, MAX_UPLOAD_BYTES)
+    if (bytes.byteLength === 0) {
+      throw new HttpError(400, 'invalid_request', 'the uploaded file is empty')
+    }
+    const value = await this.#dsh().uploadFile(sessionId, { bytes, name, mediaType })
+    writeJson(res, 200, {
+      ok: true,
+      sessionId,
+      receiptId: value?.receiptId ?? '',
+      file: value?.file ?? null,
+      image: value?.image ?? null,
+    })
   }
 
   async hSessionInterrupt({ res, params }) {

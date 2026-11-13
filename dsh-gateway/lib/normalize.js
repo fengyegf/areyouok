@@ -139,6 +139,33 @@ export function imagesOfContent(content) {
   return images
 }
 
+/**
+ * 从 DSH 消息的 content 块中提取「已入库」的文件附件引用。
+ *
+ * prompt 里的文件在会话记录里落成 `{type:'file', attachment:{attachmentId, name,
+ * bytes}}`（见 `FileAttachmentRef`）；同一 block 只带 receiptId 的即时上传不会
+ * 留在记录里，这里自然跳过。
+ *
+ * @param {unknown} content - `[{type:'file', attachment:{…}}]` 形状的 content 数组。
+ * @returns {Array<{attachmentId:string, name:string, bytes?:number}>}
+ */
+export function filesOfContent(content) {
+  const files = []
+  for (const block of asArray(content)) {
+    if (!isRecord(block) || block.type !== 'file') continue
+    const attachment = isRecord(block.attachment) ? block.attachment : null
+    if (attachment === null) continue
+    const attachmentId = text(attachment.attachmentId)
+    if (attachmentId === '') continue
+    files.push(clean({
+      attachmentId,
+      name: text(attachment.name) || 'file',
+      bytes: num(attachment.bytes),
+    }))
+  }
+  return files
+}
+
 /** 规范化提问项列表（保留未知字段，保证不丢信息）。 */
 function normalizeQuestions(value) {
   return asArray(value)
@@ -245,6 +272,7 @@ function normalizeDurableEvent(sessionId, event) {
     case 'user/message': {
       const message = isRecord(event.data) ? event.data : payload
       const images = imagesOfContent(message.content)
+      const files = filesOfContent(message.content)
       return {
         kind: 'message.user',
         topic,
@@ -257,6 +285,7 @@ function normalizeDurableEvent(sessionId, event) {
           text: messageText(message),
           message,
           ...(images.length > 0 ? { images } : {}),
+          ...(files.length > 0 ? { files } : {}),
           // DSH 用 `source.kind` 区分「真人输入」与机器注入（tool-jobs 通知、
           // subagent 结算、团队消息、runtime-context…）。客户端据此决定是否
           // 当成用户气泡展示，避免把后台任务通知画成用户自己发的话。
