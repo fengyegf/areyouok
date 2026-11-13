@@ -224,10 +224,19 @@
     <string name="settings_overlay_permission_missing">未授权，点按开启</string>
     <string name="settings_overlay_permission_hint">需要「显示在其他应用上层」权限才能显示悬浮气泡；未授权时仍使用通知栏提醒。</string>
 
+    <!-- 运行中追加提问：立即发送 / 回答完成后追加 -->
+    <string name="composer_send_mode_title">这条消息怎么发？</string>
+    <string name="composer_send_now">立即发送</string>
+    <string name="composer_send_now_desc">马上交给 AI，引导它调整当前回答</string>
+    <string name="composer_send_after">回答完成后追加发送</string>
+    <string name="composer_send_after_desc">等这一轮跑完，再作为下一条消息发送</string>
+    <string name="composer_sent_now">已发送，正在引导当前回答</string>
+    <string name="composer_sent_after">已加入队列，本轮结束后发送</string>
     <string name="composer_attach_file">添加文件</string>
     <string name="composer_attachment_remove">移除附件</string>
     <string name="composer_attachment_read_failed">读取文件失败，或文件超过 32 MB</string>
     <string name="composer_attachment_fallback_name">附件</string>
+
     <!-- 工具结果里的文件路径（DSH <path>/<type>/<content> 信封） -->
     <string name="gateway_tool_file">文件</string>
     <string name="gateway_tool_image">图片</string>

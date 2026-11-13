@@ -112,6 +112,7 @@ import com.catmoecircle.areyouok.gateway.protocol.PermissionCatalog
 import com.catmoecircle.areyouok.gateway.protocol.PermissionOption
 import com.catmoecircle.areyouok.gateway.protocol.QuestionAnswer
 import com.catmoecircle.areyouok.gateway.protocol.ReasoningEffort
+import com.catmoecircle.areyouok.gateway.protocol.SendMessageRequest
 import com.catmoecircle.areyouok.gateway.protocol.SessionSummary
 import com.catmoecircle.areyouok.gateway.protocol.effectivePermissionPreset
 import com.catmoecircle.areyouok.gateway.repository.ChatMessage
@@ -476,12 +477,13 @@ fun ChatScreen(modifier: Modifier = Modifier) {
                 attachmentPicker.launch(arrayOf("*/*"))
             },
             onRemoveAttachment = { id -> attachments = attachments.filterNot { it.id == id } },
-            onSend = { text ->
+            onSend = { text, mode ->
                 // 发送时快照一份附件：上传期间用户继续改动输入框也不影响这条消息。
                 val pending = attachments
                 scope.launch {
                     if (repository.sendMessage(
                             text = text,
+                            mode = mode,
                             attachments = pending.map { attachment ->
                                 OutgoingAttachment(attachment.name, attachment.mimeType, attachment.bytes)
                             },
@@ -489,6 +491,15 @@ fun ChatScreen(modifier: Modifier = Modifier) {
                     ) {
                         draft = ""
                         attachments = emptyList()
+                        Toast.makeText(
+                            context,
+                            if (mode == SendMessageRequest.MODE_STEER) {
+                                R.string.composer_sent_now
+                            } else {
+                                R.string.composer_sent_after
+                            },
+                            Toast.LENGTH_SHORT,
+                        ).show()
                     }
                 }
             },
@@ -691,7 +702,8 @@ fun ChatScreenContent(
     onPickAttachments: () -> Unit = {},
     /** 从待发送列表里移除一个附件（参数是 [ComposerAttachment.id]）。 */
     onRemoveAttachment: (String) -> Unit = {},
-    onSend: (String) -> Unit,
+    /** 发送一条消息；第二个参数是发送模式：`queue`（本轮结束后追加）或 `steer`（立即引导）。 */
+    onSend: (text: String, mode: String) -> Unit,
     onStop: () -> Unit,
     onLoadOlder: () -> Unit = {},
     onOpenSidebar: () -> Unit,
@@ -767,6 +779,8 @@ fun ChatScreenContent(
         state.selectedSession != null
 
     var composerMenu by remember { mutableStateOf(ComposerMenu.NONE) }
+    // 运行中发第二条消息时的「立即发送 / 回答完成后追加」菜单；点空白处收起。
+    var sendMenuOpen by remember { mutableStateOf(false) }
     var lastComposerMenu by remember { mutableStateOf(ComposerMenu.MODEL) }
     var pendingFullAccess by remember { mutableStateOf<ComposerPermissionOption?>(null) }
     val menuVisible = composerMenu != ComposerMenu.NONE
@@ -787,6 +801,12 @@ fun ChatScreenContent(
     LaunchedEffect(state.selectedSessionId) {
         composerMenu = ComposerMenu.NONE
         pendingFullAccess = null
+        sendMenuOpen = false
+    }
+
+    // 草稿发出去（或清空）后菜单没有意义了，自动收起。
+    LaunchedEffect(draft) {
+        if (draft.isBlank()) sendMenuOpen = false
     }
 
     Box(
@@ -846,6 +866,21 @@ fun ChatScreenContent(
             )
         }
 
+        // 发送时机菜单的点击外部收起层：放在输入区之前绘制，菜单与输入框都在它上层。
+        AnimatedVisibility(
+            visible = sendMenuOpen,
+            enter = fadeIn(tween(100)),
+            exit = fadeOut(tween(100)),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(interactionSource = null, indication = null) {
+                        sendMenuOpen = false
+                    },
+            )
+        }
+
         // 当前对话有待处理的审批/提问时，底部输入框整体换成待处理卡片（底部弹窗）。
         if (sessionPending.isEmpty()) {
             ChatComposerDock(
@@ -855,7 +890,11 @@ fun ChatScreenContent(
                 attachments = attachments,
                 onPickAttachments = onPickAttachments,
                 onRemoveAttachment = onRemoveAttachment,
-                onSend = { onSend(draft) },
+                onSend = { onSend(draft, SendMessageRequest.MODE_QUEUE) },
+                onSendMode = { mode -> onSend(draft, mode) },
+                sendMenuOpen = sendMenuOpen,
+                onOpenSendMenu = { sendMenuOpen = !sendMenuOpen },
+                onDismissSendMenu = { sendMenuOpen = false },
                 running = state.running,
                 onStop = onStop,
                 modelLabel = currentModelLabel,
@@ -1058,6 +1097,11 @@ private fun ChatComposerDock(
     onPickAttachments: () -> Unit = {},
     onRemoveAttachment: (String) -> Unit = {},
     onSend: () -> Unit,
+    /** running 时用第二条消息引导当前回答：`queue` / `steer`。 */
+    onSendMode: (String) -> Unit = { onSend() },
+    sendMenuOpen: Boolean = false,
+    onOpenSendMenu: () -> Unit = {},
+    onDismissSendMenu: () -> Unit = {},
     running: Boolean,
     onStop: () -> Unit,
     modifier: Modifier = Modifier,
@@ -1098,6 +1142,31 @@ private fun ChatComposerDock(
                 )
                 .padding(top = 28.dp, bottom = 14.dp)
         ) {
+            // 运行中发第二条消息前先选「立即发送 / 回答完成后追加」——两条都会被 AI 看到，
+            // 区别只在时机：steer 立刻插进当前回答，queue 等这一轮跑完再发。
+            AnimatedVisibility(
+                visible = sendMenuOpen,
+                enter = fadeIn(tween(120)) + slideInVertically(tween(160)) { it / 6 },
+                exit = fadeOut(tween(90)) + slideOutVertically(tween(120)) { it / 6 },
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    ComposerSendModeMenu(
+                        onSendNow = {
+                            onDismissSendMenu()
+                            onSendMode(SendMessageRequest.MODE_STEER)
+                        },
+                        onSendAfter = {
+                            onDismissSendMenu()
+                            onSendMode(SendMessageRequest.MODE_QUEUE)
+                        },
+                    )
+                }
+            }
             ChatComposer(
                 value = value,
                 onValueChange = onValueChange,
@@ -1107,6 +1176,7 @@ private fun ChatComposerDock(
                 onSend = onSend,
                 running = running,
                 onStop = onStop,
+                onOpenSendMenu = onOpenSendMenu,
                 modelLabel = modelLabel,
                 effortLabel = effortLabel,
                 onModelClick = onModelClick,
@@ -1140,6 +1210,8 @@ fun ChatComposer(
     onSend: (() -> Unit)? = null,
     running: Boolean = false,
     onStop: (() -> Unit)? = null,
+    /** running 且有草稿时点发送按钮：弹出发送模式菜单。 */
+    onOpenSendMenu: (() -> Unit)? = null,
     modelLabel: String = "",
     effortLabel: String? = null,
     onModelClick: (() -> Unit)? = null,
@@ -1326,6 +1398,7 @@ fun ChatComposer(
                 canSend = value.isNotBlank() || attachments.isNotEmpty(),
                 onSend = onSend,
                 onStop = onStop,
+                onOpenSendMenu = onOpenSendMenu,
                 modifier = Modifier.align(
                     ComposerActionAlignment(verticalFraction = 0.5f + 0.5f * morph)
                 ),
@@ -1395,16 +1468,19 @@ private fun ComposerActionButton(
     canSend: Boolean,
     onSend: (() -> Unit)?,
     onStop: (() -> Unit)?,
+    onOpenSendMenu: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val colorScheme = MaterialTheme.colorScheme
+    // 运行中且输入框有草稿 = 要再发一条消息（先选立即/追加）；运行中且没草稿 = 停止本轮。
+    val stopping = running && !canSend
     val active = running || canSend
     val background = when {
-        running -> Color(0xFFFF3B30)
+        stopping -> Color(0xFFFF3B30)
         canSend -> colorScheme.primary
         else -> colorScheme.surfaceVariant.copy(alpha = 0.8f)
     }
-    val label = if (running) {
+    val label = if (stopping) {
         stringResource(R.string.gateway_stop)
     } else {
         stringResource(R.string.gateway_send)
@@ -1420,16 +1496,20 @@ private fun ComposerActionButton(
                 role = Role.Button,
                 onClickLabel = label,
                 onClick = {
-                    if (running) onStop?.invoke() else onSend?.invoke()
+                    when {
+                        stopping -> onStop?.invoke()
+                        running -> onOpenSendMenu?.invoke()
+                        else -> onSend?.invoke()
+                    }
                 },
             )
             .semantics { contentDescription = label },
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            text = if (running) "■" else "↑",
+            text = if (stopping) "■" else "↑",
             color = if (active) Color.White else colorScheme.onSurfaceVariant,
-            fontSize = if (running) 12.sp else 17.sp,
+            fontSize = if (stopping) 12.sp else 17.sp,
             fontWeight = FontWeight.SemiBold,
         )
     }
@@ -1604,7 +1684,7 @@ private fun ChatScreenPreview() {
             state = ChatScreenState(),
             draft = "",
             onDraftChange = {},
-            onSend = {},
+            onSend = { _, _ -> },
             onStop = {},
             onOpenSidebar = {},
             sidebarOpen = false,

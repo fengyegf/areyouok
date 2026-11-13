@@ -638,3 +638,40 @@ fun FullAccessConfirmDialog(
         }
     }
 }
+
+/**
+ * 运行中再发第二条消息时的「发送时机」菜单（对齐桌面端两种状态）。
+ *
+ * - 立即发送（steer）：马上交给 AI，引导/纠正当前回答；
+ * - 回答完成后追加（queue）：等这一轮跑完，作为下一条消息发送。
+ *
+ * 只有运行中且输入框有内容时才会出现；普通发送仍然是点一下直接发出。
+ */
+@Composable
+fun ComposerSendModeMenu(
+    onSendNow: () -> Unit,
+    onSendAfter: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    ComposerMenuCard(modifier = modifier) {
+        Text(
+            text = stringResource(R.string.composer_send_mode_title),
+            color = colorScheme.onSurfaceVariant,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 6.dp),
+        )
+        ComposerMenuRow(
+            label = stringResource(R.string.composer_send_now),
+            description = stringResource(R.string.composer_send_now_desc),
+            selected = false,
+            onClick = onSendNow,
+        )
+        ComposerMenuRow(
+            label = stringResource(R.string.composer_send_after),
+            description = stringResource(R.string.composer_send_after_desc),
+            selected = false,
+            onClick = onSendAfter,
+        )
+    }
+}
