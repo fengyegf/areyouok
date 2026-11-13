@@ -1235,11 +1235,19 @@ fun ChatComposer(
     LaunchedEffect(imeVisible) {
         if (imeVisible) {
             keyboardWasVisible = true
-        } else if (keyboardWasVisible) {
-            keyboardWasVisible = false
-            if (focused) {
-                focusManager.clearFocus()
-            }
+            return@LaunchedEffect
+        }
+        if (!keyboardWasVisible) return@LaunchedEffect
+        keyboardWasVisible = false
+        if (!focused) return@LaunchedEffect
+        // 收起动画走完时焦点还在输入框上有两种可能：
+        // 1) 用户用返回键/手势收起键盘：需要清焦点，否则光标一直亮着、再点也不会弹键盘；
+        // 2) 收起途中又点回输入框、键盘正要重新弹出：这时清焦点会把刚发起的弹出掐掉，
+        //    键盘先弹一半又掉回去，看起来就是上下两段动画在打架（抽搐）。
+        // 先等一个键盘动画周期再决定：期间键盘若重新出现，本协程会被取消，焦点保持不动。
+        kotlinx.coroutines.delay(ComposerImeFocusGraceMs)
+        if (shouldReleaseComposerFocus(focused, imeVisible, imeAnimationTarget.getBottom(density))) {
+            focusManager.clearFocus()
         }
     }
 
@@ -1267,6 +1275,7 @@ fun ChatComposer(
     // ---- 展开进度：整个「胶囊 → 卡片」的形变共用同一个 0..1 进度 ----------
     // 有软键盘时只跟键盘高度走：键盘开始上移的同帧卡片开始形变，键盘到位同帧到 1；
     // 收起时随键盘回落同步收完（不会有回弹）。
+    // 收起途中又点回输入框时，键盘回升期间进度只升不降（见 [composerMorphOnReversal]）。
     // 键盘迟迟不出现（硬件键盘/预览）才退回本地 220ms 补间，保证操作行仍可用。
     val fallbackFraction by animateFloatAsState(
         targetValue = if (focused) 1f else 0f,
@@ -1289,12 +1298,21 @@ fun ChatComposer(
     if (imeFraction > 0f && fallbackActive) {
         SideEffect { fallbackActive = false }
     }
+    // 上一帧的进度：只用于判断「键盘正在回升时进度是否在倒退」，是普通字段，不参与重组。
+    val lastMorph = remember { floatArrayOf(0f) }
+    val rawMorph = when {
+        imeFraction > 0f -> imeFraction
+        fallbackActive -> fallbackFraction
+        else -> 0f
+    }
     val morph = expandedOverride?.let { if (it) 1f else 0f }
-        ?: when {
-            imeFraction > 0f -> imeFraction
-            fallbackActive -> fallbackFraction
-            else -> 0f
-        }
+        ?: composerMorphOnReversal(
+            raw = rawMorph,
+            previous = lastMorph[0],
+            imeBottom = imeInsets.getBottom(density),
+            imeTargetBottom = imeAnimationTarget.getBottom(density),
+        )
+    lastMorph[0] = morph
 
     // 宽度、左右留白、底行高度、文字可用宽度全部由同一个进度插值。
     val sideInset = ComposerSideInsetCollapsed +
