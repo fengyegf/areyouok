@@ -6,11 +6,13 @@ import com.catmoecircle.areyouok.gateway.protocol.GatewayJson
 import com.catmoecircle.areyouok.gateway.protocol.Intervention
 import com.catmoecircle.areyouok.gateway.protocol.InterventionAnswer
 import com.catmoecircle.areyouok.gateway.protocol.Message
+import com.catmoecircle.areyouok.gateway.protocol.MessageFile
 import com.catmoecircle.areyouok.gateway.protocol.MessageImage
 import com.catmoecircle.areyouok.gateway.protocol.MessageSource
 import com.catmoecircle.areyouok.gateway.protocol.ModelCatalog
 import com.catmoecircle.areyouok.gateway.protocol.ModelSelection
 import com.catmoecircle.areyouok.gateway.protocol.PermissionCatalog
+import com.catmoecircle.areyouok.gateway.protocol.OutgoingAttachment
 import com.catmoecircle.areyouok.gateway.protocol.QuestionAnswer
 import com.catmoecircle.areyouok.gateway.protocol.SendMessageRequest
 import com.catmoecircle.areyouok.gateway.protocol.ServerEvent
@@ -597,6 +599,7 @@ class GatewayRepository(
             GatewayJson.json.decodeFromJsonElement(Message.serializer(), source)
         }.getOrNull() ?: return null
         val images = decodeImages(data)
+        val files = decodeFiles(data)
         // 网关在事件顶层另带 `seq` / `time` / `role` / `text` / `source`：
         // `data.message` 只是 DSH 原始消息（没有 seq），只解码它会丢掉事件 seq。
         // 而 seq 是消息在时间线里的稳定身份：丢了以后重连补发 / 历史分页无法识别
@@ -607,9 +610,20 @@ class GatewayRepository(
             role = data.string("role") ?: decoded.role,
             text = decoded.text.ifBlank { data.string("text") ?: "" },
             images = if (images.isNotEmpty()) images else decoded.images,
+            files = if (files.isNotEmpty()) files else decoded.files,
             source = decoded.source ?: decodeSource(data["source"] as? JsonObject),
         )
-        return message.takeIf { it.text.isNotBlank() || it.seq != null || it.images.isNotEmpty() }
+        return message.takeIf {
+            it.text.isNotBlank() || it.seq != null || it.images.isNotEmpty() || it.files.isNotEmpty()
+        }
+    }
+
+    /** 事件顶层的 `files`（网关从 DSH content 块里拆出来的文件附件引用）。 */
+    private fun decodeFiles(data: JsonObject): List<MessageFile> {
+        val raw = data["files"] as? JsonArray ?: return emptyList()
+        return runCatching {
+            GatewayJson.json.decodeFromJsonElement(ListSerializer(MessageFile.serializer()), raw)
+        }.getOrDefault(emptyList()).filter { it.isUsable }
     }
 
     /** 事件顶层的 `images`（网关从 DSH content 块里拆出来的图片引用）。 */
@@ -979,30 +993,84 @@ class GatewayRepository(
 
     // ------------------------------------------------------------ 本机操作
 
-    suspend fun sendMessage(text: String, mode: String = SendMessageRequest.MODE_QUEUE): Boolean {
-        val sessionId = _selectedSessionId.value
-        if (sessionId == null) {
+    /**
+     * 发送一条消息。
+     *
+     * [attachments] 非空时先把每个文件上传到网关（`POST /v1/sessions/{id}/files`），
+     * 再把回执 id 一起交给 `session/prompt`；上传失败不会发出半条消息。
+     *
+     * @return 网关接受（`accepted`）时为 true；无选中会话、空消息、上传或发送失败为 false。
+     */
+    suspend fun sendMessage(
+        text: String,
+        mode: String = SendMessageRequest.MODE_QUEUE,
+        sessionId: String? = null,
+        attachments: List<OutgoingAttachment> = emptyList(),
+    ): Boolean {
+        val targetSessionId = sessionId?.takeIf { it.isNotBlank() } ?: _selectedSessionId.value
+        if (targetSessionId == null) {
             emitNotice(NoticeLevel.WARN, "请先选择会话")
             return false
         }
         val trimmed = text.trim()
-        if (trimmed.isEmpty()) return false
-        assembler.appendLocalUser(trimmed, clock())
-        publishMessages()
+        if (trimmed.isEmpty() && attachments.isEmpty()) return false
+        // 只有发给「当前打开着的会话」才做乐观气泡；后台气泡给别的会话布置任务时
+        // 不能把消息塞进用户眼前的时间线。只有附件、没有文字时不画乐观气泡：
+        // DSH 里这条 user 消息正文为空（文件在附件的 content 块里），等真实消息到达再插入。
+        val inSelectedSession = targetSessionId == _selectedSessionId.value
+        if (inSelectedSession && trimmed.isNotEmpty()) {
+            assembler.appendLocalUser(trimmed, clock())
+            publishMessages()
+        }
         return try {
-            transport.api.sendMessage(sessionId, trimmed, mode)
-            markSessionPrompted(sessionId)
+            val files = uploadAttachments(targetSessionId, attachments)
+            transport.api.sendMessage(targetSessionId, trimmed, mode, files)
+            markSessionPrompted(targetSessionId)
             true
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
-            assembler.removeLocalUser(trimmed)
-            publishMessages()
-            emitNotice(NoticeLevel.ERROR, "发送失败：${error.toUserMessage()}")
+            if (inSelectedSession) {
+                assembler.removeLocalUser(trimmed)
+                publishMessages()
+            }
+            val action = if (attachments.isEmpty()) "发送" else "上传/发送"
+            emitNotice(NoticeLevel.ERROR, "${action}失败：${error.toUserMessage()}")
             false
         }
     }
 
+    /**
+     * 逐个上传附件，返回按原顺序排列的回执 id。
+     *
+     * 一次只传一个：网关按顺序转发给宿主，失败时前面的回执会被丢弃（宿主 TTL 到期），
+     * 不会把「只有一半附件」的消息发出去。
+     */
+    private suspend fun uploadAttachments(
+        sessionId: String,
+        attachments: List<OutgoingAttachment>,
+    ): List<String> {
+        if (attachments.isEmpty()) return emptyList()
+        val receipts = ArrayList<String>(attachments.size)
+        for (attachment in attachments) {
+            val response = transport.api.uploadFile(
+                sessionId = sessionId,
+                name = attachment.name,
+                mimeType = attachment.mimeType,
+                bytes = attachment.bytes,
+            )
+            val receiptId = response.receiptId
+            if (receiptId.isNullOrBlank()) {
+                throw GatewayException(
+                    GatewayException.CODE_INVALID_REQUEST,
+                    0,
+                    "文件上传没有返回回执",
+                )
+            }
+            receipts += receiptId
+        }
+        return receipts
+    }
     /**
      * 切换当前会话下一次 prompt 使用的模型 / 思考强度（DSH `session/selectModel`）。
      *

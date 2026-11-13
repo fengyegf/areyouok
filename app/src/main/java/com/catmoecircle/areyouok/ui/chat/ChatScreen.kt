@@ -107,6 +107,7 @@ import com.catmoecircle.areyouok.gateway.pairing.PairInviteParser
 import com.catmoecircle.areyouok.gateway.protocol.Intervention
 import com.catmoecircle.areyouok.gateway.protocol.ModelCatalog
 import com.catmoecircle.areyouok.gateway.protocol.ModelSelection
+import com.catmoecircle.areyouok.gateway.protocol.OutgoingAttachment
 import com.catmoecircle.areyouok.gateway.protocol.PermissionCatalog
 import com.catmoecircle.areyouok.gateway.protocol.PermissionOption
 import com.catmoecircle.areyouok.gateway.protocol.QuestionAnswer
@@ -205,6 +206,7 @@ fun ChatScreen(modifier: Modifier = Modifier) {
     val notificationDeniedText = stringResource(R.string.settings_notifications_permission_denied)
     val scanFailedText = stringResource(R.string.gateway_scan_failed)
     val invalidUrlText = stringResource(R.string.gateway_pair_invalid)
+    val attachmentReadFailedText = stringResource(R.string.composer_attachment_read_failed)
 
     val connection by repository.connection.collectAsState()
     val sessions by repository.sessions.collectAsState()
@@ -228,6 +230,8 @@ fun ChatScreen(modifier: Modifier = Modifier) {
     val openSessionRequest by runtime.openSessionRequest.collectAsState()
 
     var draft by rememberSaveable { mutableStateOf("") }
+    // 输入框里待发送的附件：选文件时读进内存，发送成功后清空（切会话也清空）。
+    var attachments by remember { mutableStateOf<List<ComposerAttachment>>(emptyList()) }
     var sidebarOpen by rememberSaveable { mutableStateOf(false) }
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     var pairing by remember { mutableStateOf(false) }
@@ -286,6 +290,27 @@ fun ChatScreen(modifier: Modifier = Modifier) {
                 openNotificationSettings(context)
             }
             permissionDeniedOnce = true
+        }
+    }
+
+    // 添加文件：系统文件选择器（可多选），读进内存后作为待发送附件挂在输入框上方。
+    val attachmentPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        scope.launch {
+            val picked = ArrayList<ComposerAttachment>(uris.size)
+            uris.forEachIndexed { index, uri ->
+                readComposerAttachment(
+                    context = context,
+                    uri = uri,
+                    id = "attachment-${System.currentTimeMillis()}-$index",
+                )?.let { attachment -> picked += attachment }
+            }
+            if (picked.size < uris.size) {
+                Toast.makeText(context, attachmentReadFailedText, Toast.LENGTH_SHORT).show()
+            }
+            if (picked.isNotEmpty()) attachments = attachments + picked
         }
     }
 
@@ -405,6 +430,11 @@ fun ChatScreen(modifier: Modifier = Modifier) {
         }
     }
 
+    // 切换会话时丢弃未发送的附件：上一段对话的草稿不该跟着跑到新会话里。
+    LaunchedEffect(selectedSessionId) {
+        attachments = emptyList()
+    }
+
     // 设置页打开时让聊天内容退出无障碍树，避免读屏聚焦到被盖住的控件。
     val chatModifier = if (settingsOpen) {
         modifier.clearAndSetSemantics { }
@@ -434,9 +464,26 @@ fun ChatScreen(modifier: Modifier = Modifier) {
             ),
             draft = draft,
             onDraftChange = { draft = it },
+            attachments = attachments,
+            onPickAttachments = {
+                focusManager.clearFocus()
+                attachmentPicker.launch(arrayOf("*/*"))
+            },
+            onRemoveAttachment = { id -> attachments = attachments.filterNot { it.id == id } },
             onSend = { text ->
+                // 发送时快照一份附件：上传期间用户继续改动输入框也不影响这条消息。
+                val pending = attachments
                 scope.launch {
-                    if (repository.sendMessage(text)) draft = ""
+                    if (repository.sendMessage(
+                            text = text,
+                            attachments = pending.map { attachment ->
+                                OutgoingAttachment(attachment.name, attachment.mimeType, attachment.bytes)
+                            },
+                        )
+                    ) {
+                        draft = ""
+                        attachments = emptyList()
+                    }
                 }
             },
             onStop = { scope.launch { repository.interrupt() } },
@@ -611,6 +658,12 @@ fun ChatScreenContent(
     state: ChatScreenState,
     draft: String,
     onDraftChange: (String) -> Unit,
+    /** 输入框里待发送的附件（点「+」从系统文件选择器挑进来的本地文件）。 */
+    attachments: List<ComposerAttachment> = emptyList(),
+    /** 打开系统文件选择器添加附件。 */
+    onPickAttachments: () -> Unit = {},
+    /** 从待发送列表里移除一个附件（参数是 [ComposerAttachment.id]）。 */
+    onRemoveAttachment: (String) -> Unit = {},
     onSend: (String) -> Unit,
     onStop: () -> Unit,
     onLoadOlder: () -> Unit = {},
@@ -766,6 +819,9 @@ fun ChatScreenContent(
                 backdrop = backdrop,
                 value = draft,
                 onValueChange = onDraftChange,
+                attachments = attachments,
+                onPickAttachments = onPickAttachments,
+                onRemoveAttachment = onRemoveAttachment,
                 onSend = { onSend(draft) },
                 running = state.running,
                 onStop = onStop,
@@ -964,6 +1020,10 @@ private fun ChatComposerDock(
     backdrop: LayerBackdrop,
     value: String,
     onValueChange: (String) -> Unit,
+    /** 已选好、等待随下一条消息发送的附件。 */
+    attachments: List<ComposerAttachment> = emptyList(),
+    onPickAttachments: () -> Unit = {},
+    onRemoveAttachment: (String) -> Unit = {},
     onSend: () -> Unit,
     running: Boolean,
     onStop: () -> Unit,
@@ -1008,6 +1068,9 @@ private fun ChatComposerDock(
             ChatComposer(
                 value = value,
                 onValueChange = onValueChange,
+                attachments = attachments,
+                onPickAttachments = onPickAttachments,
+                onRemoveAttachment = onRemoveAttachment,
                 onSend = onSend,
                 running = running,
                 onStop = onStop,
@@ -1036,6 +1099,11 @@ fun ChatComposer(
     onValueChange: (String) -> Unit,
     modifier: Modifier = Modifier,
     expandedOverride: Boolean? = null,
+    /** 已选好、等待随下一条消息发送的附件。 */
+    attachments: List<ComposerAttachment> = emptyList(),
+    /** 操作行左侧「+」：打开系统文件选择器。 */
+    onPickAttachments: () -> Unit = {},
+    onRemoveAttachment: (String) -> Unit = {},
     onSend: (() -> Unit)? = null,
     running: Boolean = false,
     onStop: (() -> Unit)? = null,
@@ -1150,6 +1218,16 @@ fun ChatComposer(
                 .padding(start = horizontalStart, end = 8.dp, top = 4.dp, bottom = bottomInset),
         ) {
             Column(modifier = Modifier.fillMaxWidth()) {
+                // 待发送附件条：只在有附件时出现，没选文件时输入框高度与原来完全一致。
+                if (attachments.isNotEmpty()) {
+                    ComposerAttachmentRail(
+                        attachments = attachments,
+                        onRemove = onRemoveAttachment,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 6.dp, end = 6.dp, top = 6.dp),
+                    )
+                }
                 // 输入行始终在同一个组合位置：形变过程中不会重建 BasicTextField，焦点不丢。
                 Row(
                     modifier = Modifier
@@ -1184,6 +1262,7 @@ fun ChatComposer(
                                 .padding(end = 44.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
+                            ComposerAttachButton(onClick = onPickAttachments)
                             if (onPermissionClick != null) {
                                 ComposerPermissionButton(
                                     currentValue = permissionValue,
@@ -1210,7 +1289,8 @@ fun ChatComposer(
             // 用自定义 Alignment 而不是 BottomEnd，避免两个状态之间跳变。
             ComposerActionButton(
                 running = running,
-                canSend = value.isNotBlank(),
+                // 只有附件没有文字也能发：文件本身就是这条消息的内容。
+                canSend = value.isNotBlank() || attachments.isNotEmpty(),
                 onSend = onSend,
                 onStop = onStop,
                 modifier = Modifier.align(

@@ -1,6 +1,7 @@
 package com.catmoecircle.areyouok.gateway.repository
 
 import com.catmoecircle.areyouok.gateway.protocol.Message
+import com.catmoecircle.areyouok.gateway.protocol.MessageFile
 import com.catmoecircle.areyouok.gateway.protocol.MessageImage
 
 /**
@@ -101,7 +102,10 @@ private fun attachEnvelopeToLastTool(
  */
 internal fun Message.toTimelineMessages(): List<ChatMessage> {
     val images = usableImages()
-    if (text.isBlank() && seq == null && reasoning.isNullOrBlank() && images.isEmpty()) return emptyList()
+    val files = usableFiles()
+    if (text.isBlank() && seq == null && reasoning.isNullOrBlank() && images.isEmpty() && files.isEmpty()) {
+        return emptyList()
+    }
     val role = when (this.role.lowercase()) {
         "user" -> MessageMapping.userRole(this) ?: return emptyList()
         "tool" -> ChatRole.TOOL
@@ -130,7 +134,7 @@ internal fun Message.toTimelineMessages(): List<ChatMessage> {
             time = time,
         )
     }
-    if (text.isNotBlank() || role != ChatRole.ASSISTANT || images.isNotEmpty()) {
+    if (text.isNotBlank() || role != ChatRole.ASSISTANT || images.isNotEmpty() || files.isNotEmpty()) {
         messages += ChatMessage(
             id = baseId,
             role = role,
@@ -139,6 +143,7 @@ internal fun Message.toTimelineMessages(): List<ChatMessage> {
             time = time,
             meta = meta,
             images = images,
+            files = files,
         )
     }
     return messages
@@ -147,6 +152,10 @@ internal fun Message.toTimelineMessages(): List<ChatMessage> {
 /** 只保留能回传给网关校验的图片引用（id/mediaType/尺寸/字节数齐全）。 */
 internal fun Message.usableImages(): List<MessageImage> =
     images.filter { it.isUsable }
+
+/** 只保留能展示的文件附件引用（id + 文件名齐全）。 */
+internal fun Message.usableFiles(): List<MessageFile> =
+    files.filter { it.isUsable }
 
 /** 历史工具行的稳定 id：优先用 seq（历史消息都有），否则退回文本哈希。 */
 private fun toolRowId(message: Message, suffix: String): String {

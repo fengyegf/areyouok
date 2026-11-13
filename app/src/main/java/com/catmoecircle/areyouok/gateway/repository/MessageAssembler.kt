@@ -89,6 +89,7 @@ class MessageAssembler {
         val text = message.text
         val seq = message.seq
         val images = message.usableImages()
+        val files = message.usableFiles()
 
         // 稳定身份：seq 优先，没有 seq 时用消息 id（重连补发 / 历史分页重叠时据此合并）。
         val identity = message.id
@@ -102,6 +103,7 @@ class MessageAssembler {
                 seq = seq ?: items[existing].seq,
                 streaming = false,
                 images = if (images.isNotEmpty()) images else items[existing].images,
+                files = if (files.isNotEmpty()) files else items[existing].files,
             )
             return false
         }
@@ -120,6 +122,7 @@ class MessageAssembler {
                     time = message.time ?: items[optimisticIndex].time,
                     meta = message.kind,
                     images = images,
+                    files = files,
                 )
                 return true
             }
@@ -158,6 +161,7 @@ class MessageAssembler {
             time = message.time,
             meta = message.kind,
             images = images,
+            files = files,
         )
         return true
     }

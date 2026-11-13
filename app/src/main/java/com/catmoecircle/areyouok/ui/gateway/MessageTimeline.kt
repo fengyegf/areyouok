@@ -493,6 +493,13 @@ private fun UserBubble(message: ChatMessage) {
             // 多图排成紧凑网格：一张图一行会把对话挤走，翻起来特别费劲。
             UserImageGrid(images = message.images, sessionId = sessionId)
         }
+        // 随消息发出的文件：只展示名称和大小，内容在宿主机上由模型按路径读取。
+        for (file in message.files) {
+            FileAttachmentChip(
+                name = file.name,
+                bytes = file.bytes,
+            )
+        }
         if (message.text.isNotBlank()) {
             Text(
                 text = message.text,

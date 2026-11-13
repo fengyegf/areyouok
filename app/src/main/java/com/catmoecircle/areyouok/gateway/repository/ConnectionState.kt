@@ -1,5 +1,6 @@
 package com.catmoecircle.areyouok.gateway.repository
 
+import com.catmoecircle.areyouok.gateway.protocol.MessageFile
 import com.catmoecircle.areyouok.gateway.protocol.MessageImage
 import com.catmoecircle.areyouok.gateway.protocol.Question
 import com.catmoecircle.areyouok.gateway.protocol.QuestionAnswer
@@ -76,6 +77,8 @@ data class ChatMessage(
      * 只存引用不存字节：点击/可见时按需向网关要预览，PC 上文件没了就显示不出来。
      */
     val images: List<MessageImage> = emptyList(),
+    /** 随消息一起发出的文件附件（名称 + 字节数，内容在宿主机上，客户端不下载）。 */
+    val files: List<MessageFile> = emptyList(),
     /** 问答卡片的题目列表（仅 [ChatRole.QUESTION] 使用）。 */
     val questions: List<Question> = emptyList(),
     /** 问答卡片里用户提交的回答（仅 [ChatRole.QUESTION] 使用）。 */

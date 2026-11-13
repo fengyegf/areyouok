@@ -215,6 +215,10 @@
     <string name="composer_full_access_confirm">启用完全权限</string>
     <string name="composer_cancel">取消</string>
 
+    <string name="composer_attach_file">添加文件</string>
+    <string name="composer_attachment_remove">移除附件</string>
+    <string name="composer_attachment_read_failed">读取文件失败，或文件超过 32 MB</string>
+    <string name="composer_attachment_fallback_name">附件</string>
     <!-- 工具结果里的文件路径（DSH <path>/<type>/<content> 信封） -->
     <string name="gateway_tool_file">文件</string>
     <string name="gateway_tool_image">图片</string>

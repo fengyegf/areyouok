@@ -212,6 +212,8 @@ data class Message(
      * （`GET /v1/sessions/{id}/attachments/{attachmentId}`）。
      */
     val images: List<MessageImage> = emptyList(),
+    /** 消息携带的文件附件（用户随 prompt 一起发来的文件）。 */
+    val files: List<MessageFile> = emptyList(),
 )
 
 /**
@@ -233,6 +235,20 @@ data class MessageImage(
         get() = attachmentId.isNotBlank() &&
             mediaType?.startsWith("image/") == true &&
             width != null && height != null && bytes != null
+}
+
+/**
+ * 一个已入库文件附件的引用（DSH `FileAttachmentRef` 的客户端镜像）。
+ *
+ * 文件内容由模型按宿主机上的只读路径自行读取；客户端只用它展示文件名和大小。
+ */
+@Serializable
+data class MessageFile(
+    val attachmentId: String = "",
+    val name: String = "",
+    val bytes: Long? = null,
+) {
+    val isUsable: Boolean get() = attachmentId.isNotBlank() && name.isNotBlank()
 }
 
 /**
@@ -795,12 +811,26 @@ data class CreateSessionRequest(
 data class SendMessageRequest(
     val text: String,
     val mode: String = MODE_QUEUE,
+    /**
+     * 已上传文件的回执 id（`POST /v1/sessions/{id}/files` 的返回值）。
+     *
+     * 网关把它们拼成 DSH prompt 的 `{type:'file', receiptId}` 内容块；null 时
+     * 整个字段不出现在 JSON 里（`explicitNulls=false`），纯文本消息完全不变。
+     */
+    val files: List<String>? = null,
 ) {
     companion object {
         const val MODE_QUEUE = "queue"
         const val MODE_STEER = "steer"
     }
 }
+
+/** 客户端本地待上传的一个文件（不是线格式，只是 [SendMessageRequest.files] 的输入）。 */
+class OutgoingAttachment(
+    val name: String,
+    val mimeType: String?,
+    val bytes: ByteArray,
+)
 
 /** POST /v1/sessions/{id}/model 的请求体。 */
 @Serializable
@@ -826,6 +856,19 @@ data class OkResponse(
     val ok: Boolean = true,
     val sessionId: String? = null,
     val accepted: Boolean? = null,
+)
+
+/** POST /v1/sessions/{id}/files 的响应：`{ok, receiptId, file:{…}, image?:{…}}`。 */
+@Serializable
+data class UploadFileResponse(
+    val ok: Boolean = true,
+    val sessionId: String? = null,
+    /** 下一条消息引用这个文件时使用的回执 id。 */
+    val receiptId: String? = null,
+    /** 普通文件的入库引用（带 mediaType 上传图片时可能为空，改看 [image]）。 */
+    val file: MessageFile? = null,
+    /** 图片归一化后的 `ImageAttachmentRef`（原样保留，客户端暂不消费）。 */
+    val image: JsonElement? = null,
 )
 
 /** POST /v1/sessions 的响应：`{ok,sessionId,agentPreset?}`。 */

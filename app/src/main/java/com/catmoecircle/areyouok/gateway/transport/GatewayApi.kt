@@ -12,6 +12,7 @@ import com.catmoecircle.areyouok.gateway.protocol.PermissionCatalog
 import com.catmoecircle.areyouok.gateway.protocol.PermissionResult
 import com.catmoecircle.areyouok.gateway.protocol.SessionState
 import com.catmoecircle.areyouok.gateway.protocol.SessionSummary
+import com.catmoecircle.areyouok.gateway.protocol.UploadFileResponse
 import com.catmoecircle.areyouok.gateway.protocol.Workspace
 import kotlinx.serialization.json.JsonElement
 
@@ -80,7 +81,22 @@ interface GatewayApi {
         sessionId: String,
         text: String,
         mode: String = "queue",
+        /** 先上传好的文件回执 id（见 [uploadFile]）；空列表时请求体里不带该字段。 */
+        files: List<String> = emptyList(),
     ): OkResponse
+
+    /**
+     * POST /v1/sessions/{id}/files：把一个本地文件交给网关，换回回执。
+     *
+     * 回执只能被**同一个会话**的下一条消息引用。默认实现直接抛错：旧网关或测试
+     * 替身没有这个端点时，纯文本发送不受影响，只有带附件时才会报错。
+     */
+    suspend fun uploadFile(
+        sessionId: String,
+        name: String,
+        mimeType: String? = null,
+        bytes: ByteArray,
+    ): UploadFileResponse = throw GatewayException("unsupported", 0, "当前网关不支持文件上传")
 
     suspend fun interrupt(sessionId: String): OkResponse
 

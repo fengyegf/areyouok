@@ -21,6 +21,7 @@ import com.catmoecircle.areyouok.gateway.protocol.PermissionResult
 import com.catmoecircle.areyouok.gateway.protocol.SelectModelRequest
 import com.catmoecircle.areyouok.gateway.protocol.SelectPermissionRequest
 import com.catmoecircle.areyouok.gateway.protocol.SendMessageRequest
+import com.catmoecircle.areyouok.gateway.protocol.UploadFileResponse
 import com.catmoecircle.areyouok.gateway.protocol.SessionState
 import com.catmoecircle.areyouok.gateway.protocol.SessionSummary
 import com.catmoecircle.areyouok.gateway.protocol.Workspace
@@ -103,14 +104,57 @@ class OkHttpGatewayApi(
         sessionId: String,
         text: String,
         mode: String,
+        files: List<String>,
     ): OkResponse {
-        val body = SendMessageRequest(text = text, mode = mode)
+        val body = SendMessageRequest(
+            text = text,
+            mode = mode,
+            files = files.takeIf { it.isNotEmpty() },
+        )
         val response = post(
             "/sessions/${pathSegment(sessionId)}/messages",
             json.encodeToString(SendMessageRequest.serializer(), body),
         )
         return runCatching { decodeOrThrow<OkResponse>(response) }.getOrElse { OkResponse() }
     }
+
+    /**
+     * 文件上传：原始字节直接 POST 到 `/v1/sessions/{id}/files`，网关再转发给 DSH
+     * 的附件入库路由。图片只在这四种 media type 下带 `mediaType` 走图片归一化，
+     * 其它类型（包括系统返回的 HEIC/AVIF）一律按普通文件上传，避免宿主拒收。
+     */
+    override suspend fun uploadFile(
+        sessionId: String,
+        name: String,
+        mimeType: String?,
+        bytes: ByteArray,
+    ): UploadFileResponse = withContext(Dispatchers.IO) {
+        val endpoint = endpoint()
+        val url = (endpoint.baseUrl.trimEnd('/') + "/v1/sessions/${pathSegment(sessionId)}/files")
+            .toHttpUrlOrNull()
+            ?: throw GatewayException("invalid_request", 0, "非法 URL: ${endpoint.baseUrl}")
+        val urlBuilder = url.newBuilder().addQueryParameter("name", name)
+        imageMediaTypeOrNull(mimeType)?.let { urlBuilder.addQueryParameter("mediaType", it) }
+        val builder = Request.Builder()
+            .url(urlBuilder.build())
+            .header("Accept", "application/json")
+            .header("User-Agent", USER_AGENT)
+            .post(bytes.toRequestBody("application/octet-stream".toMediaType()))
+        if (!endpoint.token.isNullOrBlank()) {
+            builder.header("Authorization", "Bearer ${endpoint.token}")
+        }
+        client.newCall(builder.build()).execute().use { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw parseError(response.code, text)
+            val decoded = decodeOrThrow<UploadFileResponse>(text)
+            throwIfNotOk(decoded.ok, text, "文件上传失败")
+            decoded
+        }
+    }
+
+    /** DSH 图片入库只接受这四种类型；其它 MIME 按普通文件上传。 */
+    private fun imageMediaTypeOrNull(mimeType: String?): String? =
+        mimeType?.trim()?.lowercase()?.takeIf { it in UPLOAD_IMAGE_TYPES }
 
     override suspend fun interrupt(sessionId: String): OkResponse {
         val response = post("/sessions/${pathSegment(sessionId)}/interrupt", "{}")
@@ -418,6 +462,8 @@ class OkHttpGatewayApi(
 
     companion object {
         private const val USER_AGENT = "AreYouOK-Android/1.0 (dsh-gateway)"
+        /** DSH `saveImages` 接受的图片类型；上传时带 `mediaType` 才会走图片归一化。 */
+        private val UPLOAD_IMAGE_TYPES = setOf("image/png", "image/jpeg", "image/webp", "image/gif")
         private val LIST_KEYS = listOf(
             "items", "data", "list", "results",
             "workspaces", "sessions", "messages", "interventions", "pending", "models",
