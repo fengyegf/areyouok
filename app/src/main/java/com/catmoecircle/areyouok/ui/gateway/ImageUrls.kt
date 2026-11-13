@@ -55,5 +55,18 @@ fun markdownImageUrl(raw: String, sessionId: String?): String? {
 }
 
 /** 查询参数编码：空格用 `%20`（`+` 在路径里会被当成字面加号）。 */
+/** 一条消息里最多直接铺出来的图片格数；多出来的收进最后一格的「+N」。 */
+const val IMAGE_GRID_MAX_CELLS = 9
+
+/**
+ * 多图网格的列数：2–4 张两列（2×2 最省高度），5 张以上三列。
+ *
+ * 纯函数（JVM 单测覆盖），UI 只按它挑格子边长。
+ */
+fun imageGridColumns(count: Int): Int = if (count <= 4) 2 else 3
+
+/** 网格里实际铺出来的图片数：超出 IMAGE_GRID_MAX_CELLS 的部分盖成「+N」。 */
+fun imageGridVisibleCount(count: Int): Int = count.coerceIn(0, IMAGE_GRID_MAX_CELLS)
+
 private fun encode(value: String): String =
     URLEncoder.encode(value, "UTF-8").replace("+", "%20")

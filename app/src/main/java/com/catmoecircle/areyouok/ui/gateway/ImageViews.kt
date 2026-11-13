@@ -8,8 +8,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -31,11 +35,13 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.catmoecircle.areyouok.gateway.protocol.MessageImage
 
 /**
  * 按需取图：URL → 图片字节，取不到返回 null。
@@ -70,6 +76,9 @@ private object PreviewBitmapCache {
     }
 }
 
+/** 缓存 key 带上解码尺寸：缩略图和大图分开存，互不顶掉。 */
+private fun previewCacheKey(url: String, maxEdge: Int): String = url + "@" + maxEdge
+
 /**
  * 一张「按链接预览」的图片：进入可见区域时才向网关要字节，加载完按比例缩放显示。
  *
@@ -82,23 +91,32 @@ fun RemoteImage(
     maxWidth: Dp = 260.dp,
     maxHeight: Dp = 320.dp,
     contentDescription: String? = null,
+    /** 非空时按正方形格子裁切（多图网格）；为空时按原比例缩放。 */
+    squareSize: Dp? = null,
 ) {
     val fetcher = LocalImageFetcher.current
     val key = url?.takeIf { it.isNotBlank() }
-    if (key == null || fetcher == null) return
+    if (key == null || fetcher == null) {
+        // 网格里没有地址也要占住格子，否则多图会让气泡忽宽忽窄。
+        if (squareSize != null) ImageCellPlaceholder(size = squareSize)
+        return
+    }
 
-    var bitmap by remember(key) { mutableStateOf(PreviewBitmapCache.get(key)) }
-    var failed by remember(key) { mutableStateOf(false) }
-    var preview by remember(key) { mutableStateOf<Bitmap?>(null) }
+    // 网格缩略图按格子尺寸解码：别拿 1600px 的大图去塞 100dp 的方格。
+    val maxEdge = if (squareSize == null) PREVIEW_MAX_EDGE else GRID_THUMB_MAX_EDGE
+    val cacheKey = previewCacheKey(key, maxEdge)
+    var bitmap by remember(cacheKey) { mutableStateOf(PreviewBitmapCache.get(cacheKey)) }
+    var failed by remember(cacheKey) { mutableStateOf(false) }
+    var preview by remember(cacheKey) { mutableStateOf<Bitmap?>(null) }
 
-    LaunchedEffect(key, fetcher) {
+    LaunchedEffect(cacheKey, fetcher) {
         if (bitmap != null) return@LaunchedEffect
         val bytes = runCatching { fetcher.fetch(key) }.getOrNull()
-        val decoded = bytes?.let { decodePreview(it) }
+        val decoded = bytes?.let { decodePreview(it, maxEdge) }
         if (decoded == null) {
             failed = true
         } else {
-            PreviewBitmapCache.put(key, decoded)
+            PreviewBitmapCache.put(cacheKey, decoded)
             bitmap = decoded
         }
     }
@@ -108,25 +126,36 @@ fun RemoteImage(
         loaded != null -> Image(
             bitmap = loaded.asImageBitmap(),
             contentDescription = contentDescription,
-            contentScale = ContentScale.Fit,
+            contentScale = if (squareSize == null) ContentScale.Fit else ContentScale.Crop,
             modifier = modifier
-                .sizeIn(maxWidth = maxWidth, maxHeight = maxHeight)
-                .clip(RoundedCornerShape(12.dp))
+                .then(
+                    if (squareSize == null) {
+                        Modifier.sizeIn(maxWidth = maxWidth, maxHeight = maxHeight)
+                    } else {
+                        Modifier.size(squareSize)
+                    },
+                )
+                .clip(RoundedCornerShape(if (squareSize == null) 12.dp else 10.dp))
                 .clickable { preview = loaded },
         )
 
-        failed -> Text(
-            text = "图片无法预览",
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-            fontSize = 11.sp,
-            modifier = modifier,
-        )
+        failed -> if (squareSize == null) {
+            Text(
+                text = "图片无法预览",
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                fontSize = 11.sp,
+                modifier = modifier,
+            )
+        } else {
+            ImageCellPlaceholder(size = squareSize, label = "无法预览")
+        }
 
-        else -> Unit
+        // 网格里先占位（多图逐张加载时格子不会忽有忽无）；单图仍按原样留白。
+        else -> if (squareSize == null) Unit else ImageCellPlaceholder(size = squareSize)
     }
 
     preview?.let { shown ->
-        ImagePreviewDialog(bitmap = shown, onDismiss = { preview = null })
+        ImagePreviewDialog(bitmap = shown, url = key, onDismiss = { preview = null })
     }
 }
 
@@ -137,11 +166,24 @@ fun RemoteImage(
  * 避免和拖动/双击抢事件而误关。
  */
 @Composable
-fun ImagePreviewDialog(bitmap: Bitmap, onDismiss: () -> Unit) {
+fun ImagePreviewDialog(bitmap: Bitmap, onDismiss: () -> Unit, url: String? = null) {
+    // 网格里点开的是缩略图：先顶上缩略图，再去取同一张的全尺寸版本换掉。
+    var shown by remember(bitmap) { mutableStateOf(bitmap) }
+    val fetcher = LocalImageFetcher.current
+    LaunchedEffect(url, fetcher) {
+        val key = url?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
+        if (fetcher == null) return@LaunchedEffect
+        val fullKey = previewCacheKey(key, PREVIEW_MAX_EDGE)
+        val full = PreviewBitmapCache.get(fullKey)
+            ?: runCatching { fetcher.fetch(key) }.getOrNull()
+                ?.let { decodePreview(it, PREVIEW_MAX_EDGE) }
+                ?.also { PreviewBitmapCache.put(fullKey, it) }
+        if (full != null) shown = full
+    }
     // 每次打开都是全新的预览状态（Dialog 退出组合后自动丢弃）。
     var scale by remember { mutableStateOf(PREVIEW_MIN_SCALE) }
     var offset by remember { mutableStateOf(Offset.Zero) }
-    val image = remember(bitmap) { bitmap.asImageBitmap() }
+    val image = remember(shown) { shown.asImageBitmap() }
 
     // usePlatformDefaultWidth = false：去掉对话框默认的窗口宽度上限，宽图不再被塞进小窗；
     // decorFitsSystemWindows = false：黑色背景铺到状态栏/导航栏下方，四周不留系统栏缝隙。
@@ -158,9 +200,9 @@ fun ImagePreviewDialog(bitmap: Bitmap, onDismiss: () -> Unit) {
                 .background(Color.Black)
                 .clipToBounds()
                 // 双指缩放 / 拖动：先以焦点缩放，再叠加平移，最后统一 clamp。
-                .pointerInput(bitmap) {
-                    val imageWidth = bitmap.width.toFloat()
-                    val imageHeight = bitmap.height.toFloat()
+                .pointerInput(shown) {
+                    val imageWidth = shown.width.toFloat()
+                    val imageHeight = shown.height.toFloat()
                     detectTransformGestures { centroid, pan, zoom, _ ->
                         val oldScale = scale
                         val newScale = clampPreviewScale(oldScale * zoom)
@@ -181,9 +223,9 @@ fun ImagePreviewDialog(bitmap: Bitmap, onDismiss: () -> Unit) {
                         offset = clampPreviewOffset(moved, newScale, geometry)
                     }
                 }
-                .pointerInput(bitmap) {
-                    val imageWidth = bitmap.width.toFloat()
-                    val imageHeight = bitmap.height.toFloat()
+                .pointerInput(shown) {
+                    val imageWidth = shown.width.toFloat()
+                    val imageHeight = shown.height.toFloat()
                     fun geometry(): PreviewGeometry = previewGeometry(
                         imageWidth = imageWidth,
                         imageHeight = imageHeight,
@@ -227,6 +269,95 @@ fun ImagePreviewDialog(bitmap: Bitmap, onDismiss: () -> Unit) {
                         translationX = offset.x
                         translationY = offset.y
                     },
+            )
+        }
+    }
+}
+
+// ------------------------------------------------------------------ 多图网格
+
+/** 格子之间的间隙。 */
+private val GRID_GAP = 4.dp
+
+/** 两列时的格子边长：2–4 张走 2×2，比一张一行省掉一半以上高度。 */
+private val GRID_TWO_COLUMN_CELL = 112.dp
+
+/** 三列时的格子边长：5 张以上再缩一档。 */
+private val GRID_THREE_COLUMN_CELL = 92.dp
+
+/**
+ * 用户消息里的多张图片：按网格紧凑排开，一屏能看全，不再一张占一行。
+ *
+ * - 2–4 张两列（2×2），5 张以上三列；
+ * - 每格正方形裁切，缩略图按格子尺寸解码，不拿全尺寸大图塞小格；
+ * - 点按任意一格仍然打开全屏预览（预览会再取一次全尺寸）；
+ * - 超过 IMAGE_GRID_MAX_CELLS 张时最后一格盖一层「+N」，别让一条消息把对话顶走。
+ */
+@Composable
+fun UserImageGrid(
+    images: List<MessageImage>,
+    sessionId: String?,
+    modifier: Modifier = Modifier,
+) {
+    val visible = images.take(imageGridVisibleCount(images.size))
+    if (visible.isEmpty()) return
+    val columns = imageGridColumns(visible.size)
+    val cell = if (columns == 2) GRID_TWO_COLUMN_CELL else GRID_THREE_COLUMN_CELL
+    val overflow = images.size - visible.size
+
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.End,
+        verticalArrangement = Arrangement.spacedBy(GRID_GAP),
+    ) {
+        for (rowStart in visible.indices step columns) {
+            Row(horizontalArrangement = Arrangement.spacedBy(GRID_GAP, Alignment.End)) {
+                for (index in rowStart until minOf(rowStart + columns, visible.size)) {
+                    val image = visible[index]
+                    Box {
+                        RemoteImage(
+                            url = attachmentPreviewUrl(image, sessionId),
+                            contentDescription = image.name,
+                            squareSize = cell,
+                        )
+                        if (overflow > 0 && index == visible.lastIndex) {
+                            Box(
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(Color.Black.copy(alpha = 0.45f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = "+" + overflow,
+                                    color = Color.White,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 网格里的空格占位：加载中/取不到时也占住同样尺寸，避免多图忽大忽小。 */
+@Composable
+private fun ImageCellPlaceholder(size: Dp, label: String? = null) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.10f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (label != null) {
+            Text(
+                text = label,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                fontSize = 9.sp,
             )
         }
     }
@@ -305,15 +436,22 @@ internal fun clampPreviewOffset(offset: Offset, scale: Float, geometry: PreviewG
     )
 }
 
+/** 全屏预览的解码上限（最长边 px）。 */
 private const val PREVIEW_MAX_EDGE = 1600
 
-/** 解码预览图：按最长边 1600px 采样，避免大图把内存吃满。 */
-private fun decodePreview(bytes: ByteArray): Bitmap? {
+/**
+ * 网格缩略图的解码上限（最长边 px）：百来 dp 的格子按 3x 密度约 300px，
+ * 再大就是白吃内存——缩略图不该和全屏预览抢同一份缓存。
+ */
+private const val GRID_THUMB_MAX_EDGE = 420
+
+/** 解码预览图：按最长边 [maxEdge] 采样，避免大图把内存吃满。 */
+private fun decodePreview(bytes: ByteArray, maxEdge: Int = PREVIEW_MAX_EDGE): Bitmap? {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
     if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
     var sample = 1
-    while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= PREVIEW_MAX_EDGE) {
+    while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= maxEdge) {
         sample *= 2
     }
     val options = BitmapFactory.Options().apply { inSampleSize = sample }

@@ -481,13 +481,17 @@ private fun UserBubble(message: ChatMessage) {
         horizontalAlignment = Alignment.End,
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        for (image in message.images) {
+        if (message.images.size == 1) {
+            val only = message.images[0]
             RemoteImage(
-                url = attachmentPreviewUrl(image, sessionId),
-                contentDescription = image.name,
+                url = attachmentPreviewUrl(only, sessionId),
+                contentDescription = only.name,
                 maxWidth = 240.dp,
                 maxHeight = 320.dp,
             )
+        } else if (message.images.size > 1) {
+            // 多图排成紧凑网格：一张图一行会把对话挤走，翻起来特别费劲。
+            UserImageGrid(images = message.images, sessionId = sessionId)
         }
         if (message.text.isNotBlank()) {
             Text(
