@@ -23,6 +23,7 @@ import com.catmoecircle.areyouok.R
 import com.catmoecircle.areyouok.gateway.GatewayRuntime
 import com.catmoecircle.areyouok.gateway.protocol.Intervention
 import com.catmoecircle.areyouok.gateway.protocol.InterventionAnswer
+import com.catmoecircle.areyouok.gateway.protocol.QuestionAnswer
 import com.catmoecircle.areyouok.gateway.repository.ConnectionPhase
 import com.catmoecircle.areyouok.gateway.repository.ConnectionState
 import com.catmoecircle.areyouok.gateway.repository.SessionCompletion
@@ -49,6 +50,12 @@ class GatewayService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private lateinit var runtime: GatewayRuntime
     private var foregroundStarted = false
+
+    /** 后台悬浮气泡（App 不在前台时替代通知栏做审批 / 提问 / 完成提醒）。 */
+    private lateinit var overlay: OverlayBubbleController
+
+    /** 待展示的「任务完成」气泡（新的在前；用户打开对应会话或回到 App 后清空）。 */
+    private val overlayCompletions = ArrayDeque<SessionCompletion>()
     private val notificationManager by lazy {
         NotificationManagerCompat.from(this)
     }
@@ -58,6 +65,8 @@ class GatewayService : Service() {
         runtime = GatewayRuntime.get(this)
         GatewayChannels.ensure(this)
         startForegroundSafely(runtime.repository.connection.value)
+        overlay = OverlayBubbleController(this, overlayCallbacks())
+        overlay.attach()
         scope.launch {
             runtime.repository.connection.collect { state ->
                 updateConnectionNotification(state)
@@ -72,6 +81,18 @@ class GatewayService : Service() {
         scope.launch {
             runtime.repository.sessionCompletions.collect { completion ->
                 notifySessionCompleted(completion)
+                rememberOverlayCompletion(completion)
+            }
+        }
+        // 后台悬浮气泡的数据源：待处理审批 / 提问、连接状态、运行状态、会话标题。
+        scope.launch { runtime.repository.pendingInterventions.collect { renderOverlay() } }
+        scope.launch { runtime.repository.sessionRunning.collect { renderOverlay() } }
+        scope.launch { runtime.repository.sessions.collect { renderOverlay() } }
+        scope.launch {
+            runtime.appVisibleFlow.collect { visible ->
+                // 用户回到 App：气泡里已经看过的完成提醒不再保留。
+                if (visible) overlayCompletions.clear()
+                renderOverlay()
             }
         }
         if (!runtime.repository.connection.value.isOnline) {
@@ -89,11 +110,13 @@ class GatewayService : Service() {
             }
             ACTION_CONNECT -> runtime.reconnect()
             ACTION_REFRESH -> refreshInterventionNotifications()
+            ACTION_REFRESH_OVERLAY -> renderOverlay()
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
+        if (::overlay.isInitialized) runCatching { overlay.detach() }
         scope.cancel()
         if (foregroundStarted) {
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
@@ -131,6 +154,80 @@ class GatewayService : Service() {
     private fun updateConnectionNotification(state: ConnectionState) {
         if (!foregroundStarted) return
         runCatching { notificationManager.notify(CONNECTION_NOTIFICATION_ID, buildConnectionNotification(state)) }
+    }
+
+    // ------------------------------------------------------------ 后台悬浮气泡
+
+    /** 气泡里的动作：直接复用仓库的审批 / 提问 / 发送接口，不经过界面。 */
+    private fun overlayCallbacks(): OverlayBubbleController.Callbacks =
+        object : OverlayBubbleController.Callbacks {
+            override fun onAllowOnce(eventId: String) {
+                scope.launch { runtime.repository.allowOnce(eventId) }
+            }
+
+            override fun onReject(eventId: String) {
+                scope.launch { runtime.repository.reject(eventId) }
+            }
+
+            override fun onAnswerQuestion(eventId: String, answers: List<QuestionAnswer>) {
+                scope.launch { runtime.repository.answerQuestion(eventId, answers) }
+            }
+
+            override fun onSendMessage(sessionId: String, text: String, mode: String): Boolean {
+                // 乐观返回：真正的失败会在仓库里变成提示；气泡不适合阻塞等待网络。
+                scope.launch { runtime.repository.sendMessage(text, mode, sessionId) }
+                return true
+            }
+
+            override fun onOpenSession(sessionId: String) {
+                overlayCompletions.removeAll { it.sessionId == sessionId }
+                renderOverlay()
+                openAppToSession(sessionId)
+            }
+
+            override fun onOpenApp() {
+                openAppToSession(null)
+            }
+        }
+
+    /** 把仓库状态合成一份快照交给控制器；显示 / 隐藏的最终决定在控制器里。 */
+    private fun renderOverlay() {
+        if (!::overlay.isInitialized) return
+        val connection = runtime.repository.connection.value
+        val selectedSessionId = runtime.repository.selectedSessionId.value
+        overlay.render(
+            OverlayViewState(
+                enabled = runtime.settings.overlayBubblesEnabled,
+                appVisible = runtime.appVisible,
+                connected = connection.isOnline,
+                connectionLabel = connection.displayName,
+                sessionTitle = runtime.repository.sessionTitle(selectedSessionId),
+                running = runtime.repository.sessionRunning.value,
+                pending = runtime.repository.pendingInterventions.value
+                    .sortedByDescending { it.sessionId == selectedSessionId },
+                completions = overlayCompletions.toList(),
+            ),
+        )
+    }
+
+    /** 记一条完成提醒（同一会话只留最新一条），供后台气泡展示。 */
+    private fun rememberOverlayCompletion(completion: SessionCompletion) {
+        if (completion.sessionId.isBlank()) return
+        overlayCompletions.removeAll { it.sessionId == completion.sessionId }
+        overlayCompletions.addFirst(completion)
+        while (overlayCompletions.size > MAX_OVERLAY_COMPLETIONS) overlayCompletions.removeLast()
+        renderOverlay()
+    }
+
+    /** 打开 App；带 sessionId 时 MainActivity 会切到对应对话。 */
+    private fun openAppToSession(sessionId: String?) {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
+            sessionId?.takeIf { it.isNotBlank() }?.let { putExtra(EXTRA_SESSION_ID, it) }
+        }
+        runCatching { startActivity(intent) }
     }
 
     private fun buildConnectionNotification(state: ConnectionState): Notification {
@@ -404,6 +501,7 @@ class GatewayService : Service() {
         const val ACTION_DISCONNECT = "com.catmoecircle.areyouok.gateway.action.DISCONNECT"
         const val ACTION_ANSWER = "com.catmoecircle.areyouok.gateway.action.ANSWER"
         const val ACTION_REFRESH = "com.catmoecircle.areyouok.gateway.action.REFRESH_NOTIFICATIONS"
+        const val ACTION_REFRESH_OVERLAY = "com.catmoecircle.areyouok.gateway.action.REFRESH_OVERLAY"
         const val EXTRA_EVENT_ID = "eventId"
         const val EXTRA_ANSWER_VALUE = "answerValue"
 
@@ -411,6 +509,9 @@ class GatewayService : Service() {
         const val EXTRA_SESSION_ID = "sessionId"
 
         private const val CONNECTION_NOTIFICATION_ID = 1001
+
+        /** 后台气泡最多保留几条「任务完成」提醒。 */
+        private const val MAX_OVERLAY_COMPLETIONS = 3
 
         // 通知 id 区间互不重叠：审批/提问 2000–3023，任务完成 4000–5023。
         private const val INTERVENTION_NOTIFICATION_BASE = 2000
@@ -453,6 +554,15 @@ class GatewayService : Service() {
             runCatching {
                 context.startService(
                     Intent(context, GatewayService::class.java).setAction(ACTION_REFRESH),
+                )
+            }
+        }
+
+        /** 设置页切换「后台悬浮气泡」/ 授权返回后调用：让服务按新开关重算显示。 */
+        fun refreshOverlay(context: Context) {
+            runCatching {
+                context.startService(
+                    Intent(context, GatewayService::class.java).setAction(ACTION_REFRESH_OVERLAY),
                 )
             }
         }

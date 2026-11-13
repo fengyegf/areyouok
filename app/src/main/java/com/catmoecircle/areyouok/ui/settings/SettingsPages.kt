@@ -387,12 +387,16 @@ internal fun SettingsNotificationPage(
     notifyQuestions: Boolean,
     notifyCompletion: Boolean,
     permissionGranted: Boolean,
+    overlayEnabled: Boolean,
+    overlayPermissionGranted: Boolean,
     onRequestPermission: () -> Unit,
     onOpenSystemSettings: () -> Unit,
     onNotificationsChange: (Boolean) -> Unit,
     onApprovalsChange: (Boolean) -> Unit,
     onQuestionsChange: (Boolean) -> Unit,
     onCompletionChange: (Boolean) -> Unit,
+    onOverlayChange: (Boolean) -> Unit,
+    onRequestOverlayPermission: () -> Unit,
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val childEnabled = notificationsEnabled && permissionGranted
@@ -458,6 +462,42 @@ internal fun SettingsNotificationPage(
                 enabled = childEnabled,
             )
         }
+
+        Spacer(Modifier.height(32.dp))
+
+        // 后台悬浮窗：App 不在前台时把审批/提问/完成提醒做成贴边气泡。
+        SettingsGroup(title = stringResource(R.string.settings_overlay_section)) {
+            SettingsSwitchRow(
+                title = stringResource(R.string.settings_overlay_enabled_title),
+                description = stringResource(R.string.settings_overlay_enabled_desc),
+                checked = overlayEnabled,
+                onCheckedChange = onOverlayChange,
+            )
+            SettingsNavRow(
+                icon = if (overlayPermissionGranted) {
+                    MiuixIcons.Regular.Unlock
+                } else {
+                    MiuixIcons.Regular.Lock
+                },
+                title = stringResource(R.string.settings_overlay_permission_title),
+                value = if (overlayPermissionGranted) {
+                    stringResource(R.string.settings_overlay_permission_granted)
+                } else {
+                    stringResource(R.string.settings_overlay_permission_missing)
+                },
+                valueColor = if (overlayPermissionGranted) null else colorScheme.error,
+                onClick = onRequestOverlayPermission,
+            )
+        }
+
+        Spacer(Modifier.height(12.dp))
+        Text(
+            text = stringResource(R.string.settings_overlay_permission_hint),
+            color = colorScheme.onSurfaceVariant,
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+            modifier = Modifier.padding(horizontal = 16.dp),
+        )
     }
 }
 

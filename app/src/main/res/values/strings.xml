@@ -215,6 +215,15 @@
     <string name="composer_full_access_confirm">启用完全权限</string>
     <string name="composer_cancel">取消</string>
 
+    <!-- 后台悬浮窗（overlay bubbles） -->
+    <string name="settings_overlay_section">后台悬浮窗</string>
+    <string name="settings_overlay_enabled_title">悬浮气泡</string>
+    <string name="settings_overlay_enabled_desc">App 在后台时，以贴边气泡显示审批、提问和完成提醒，可直接回答或继续布置任务</string>
+    <string name="settings_overlay_permission_title">悬浮窗权限</string>
+    <string name="settings_overlay_permission_granted">已授权</string>
+    <string name="settings_overlay_permission_missing">未授权，点按开启</string>
+    <string name="settings_overlay_permission_hint">需要「显示在其他应用上层」权限才能显示悬浮气泡；未授权时仍使用通知栏提醒。</string>
+
     <string name="composer_attach_file">添加文件</string>
     <string name="composer_attachment_remove">移除附件</string>
     <string name="composer_attachment_read_failed">读取文件失败，或文件超过 32 MB</string>

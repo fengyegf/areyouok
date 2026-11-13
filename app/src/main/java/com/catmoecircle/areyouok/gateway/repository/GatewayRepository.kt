@@ -1071,6 +1071,13 @@ class GatewayRepository(
         }
         return receipts
     }
+
+    /** 会话标题（后台气泡给「别的会话」发任务/展示完成提醒时用）。 */
+    fun sessionTitle(sessionId: String?): String? = sessionId
+        ?.takeIf { it.isNotBlank() }
+        ?.let { id -> _sessions.value.firstOrNull { it.id == id }?.title }
+        ?.takeIf { it.isNotBlank() }
+
     /**
      * 切换当前会话下一次 prompt 使用的模型 / 思考强度（DSH `session/selectModel`）。
      *

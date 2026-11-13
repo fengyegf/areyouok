@@ -56,6 +56,15 @@ class GatewaySettings(context: Context) {
         get() = prefs.getBoolean(KEY_NOTIFY_COMPLETION, true)
         set(value) = prefs.edit().putBoolean(KEY_NOTIFY_COMPLETION, value).apply()
 
+    /**
+     * 后台悬浮气泡：App 不在前台时，用悬浮窗显示审批/提问/完成提醒。
+     *
+     * 默认关闭（需要用户显式开启，并单独授予 SYSTEM_ALERT_WINDOW 权限）。
+     */
+    var overlayBubblesEnabled: Boolean
+        get() = prefs.getBoolean(KEY_OVERLAY_BUBBLES, false)
+        set(value) = prefs.edit().putBoolean(KEY_OVERLAY_BUBBLES, value).apply()
+
     fun remember(endpoint: GatewayEndpoint) {
         lastBaseUrl = endpoint.baseUrl
         lastName = endpoint.name
@@ -105,6 +114,7 @@ class GatewaySettings(context: Context) {
         private const val KEY_NOTIFY_APPROVALS = "notify_approvals"
         private const val KEY_NOTIFY_QUESTIONS = "notify_questions"
         private const val KEY_NOTIFY_COMPLETION = "notify_completion"
+        private const val KEY_OVERLAY_BUBBLES = "overlay_bubbles_enabled"
         private const val KEY_RECENT = "recent_gateways"
         private const val MAX_RECENT = 8
     }

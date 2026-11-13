@@ -83,12 +83,15 @@ class GatewayRuntime private constructor(context: Context) {
      *
      * 「任务完成」通知用它避免打扰：用户正看着这个会话时不再弹提醒。
      */
-    @Volatile
-    var appVisible: Boolean = false
-        private set
+    private val _appVisible = MutableStateFlow(false)
+
+    /** 前台/后台状态（可观察）：后台悬浮窗据此在 App 回到前台时自动收起。 */
+    val appVisibleFlow: StateFlow<Boolean> = _appVisible.asStateFlow()
+
+    val appVisible: Boolean get() = _appVisible.value
 
     fun setAppVisible(visible: Boolean) {
-        appVisible = visible
+        _appVisible.value = visible
     }
 
     val deviceName: String =

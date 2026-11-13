@@ -254,6 +254,9 @@ fun ChatScreen(modifier: Modifier = Modifier) {
     var notificationPermissionGranted by remember {
         mutableStateOf(isNotificationPermissionGranted(context))
     }
+    // 后台悬浮气泡：开关 + 系统「显示在其他应用上层」权限。
+    var overlayEnabled by remember { mutableStateOf(runtime.settings.overlayBubblesEnabled) }
+    var overlayPermissionGranted by remember { mutableStateOf(isOverlayPermissionGranted(context)) }
     // 记录是否已经在设置页点过授权：第一次被拒只提示，再次被拒（系统不再弹窗）才兜底去系统设置。
     var permissionDeniedOnce by rememberSaveable { mutableStateOf(false) }
     var knownDevices by remember { mutableStateOf(runtime.settings.recent()) }
@@ -264,6 +267,9 @@ fun ChatScreen(modifier: Modifier = Modifier) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 notificationPermissionGranted = isNotificationPermissionGranted(context)
+                // 用户可能刚从「显示在其他应用上层」授权页回来：重算状态并让气泡生效。
+                overlayPermissionGranted = isOverlayPermissionGranted(context)
+                if (overlayEnabled) GatewayService.refreshOverlay(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -523,6 +529,18 @@ fun ChatScreen(modifier: Modifier = Modifier) {
             onSelectPermission = { preset ->
                 scope.launch { repository.selectPermission(preset) }
             },
+            overlayEnabled = overlayEnabled,
+            overlayPermissionGranted = overlayPermissionGranted,
+            onOverlayChange = { enabled ->
+                overlayEnabled = enabled
+                runtime.settings.overlayBubblesEnabled = enabled
+                if (enabled && !overlayPermissionGranted) {
+                    // 先引导授权；授权回来后在 ON_RESUME 里自动生效。
+                    openOverlaySettings(context)
+                }
+                GatewayService.refreshOverlay(context)
+            },
+            onRequestOverlayPermission = { openOverlaySettings(context) },
             discoveredGateways = discoveredGateways,
             onSelectGateway = { gateway ->
                 gateway.baseUrl?.let { url -> runtime.connectTo(url, gateway.name) }
@@ -558,6 +576,8 @@ fun ChatScreen(modifier: Modifier = Modifier) {
                 notifyQuestions = notifyQuestions,
                 notifyCompletion = notifyCompletion,
                 notificationPermissionGranted = notificationPermissionGranted,
+                overlayEnabled = overlayEnabled,
+                overlayPermissionGranted = overlayPermissionGranted,
                 workStepDisplay = workStepDisplay,
                 workStepCollapseTiming = workStepCollapseTiming,
                 workStepFoldedReplies = workStepFoldedReplies,
@@ -628,6 +648,13 @@ fun ChatScreen(modifier: Modifier = Modifier) {
                     notifyCompletion = enabled
                     runtime.settings.notifyCompletion = enabled
                 },
+                onOverlayChange = { enabled ->
+                    overlayEnabled = enabled
+                    runtime.settings.overlayBubblesEnabled = enabled
+                    if (enabled && !overlayPermissionGranted) openOverlaySettings(context)
+                    GatewayService.refreshOverlay(context)
+                },
+                onRequestOverlayPermission = { openOverlaySettings(context) },
                 onWorkStepDisplayChange = { level ->
                     workStepDisplay = level
                     runtime.settings.workStepDisplay = level.name
@@ -685,6 +712,12 @@ fun ChatScreenContent(
     workStepDisplay: WorkStepDisplay = WorkStepDisplay.DEFAULT,
     workStepCollapseTiming: WorkStepCollapseTiming = WorkStepCollapseTiming.DEFAULT,
     workStepFoldedReplies: WorkStepFoldedReplies = WorkStepFoldedReplies.DEFAULT,
+    /** 后台悬浮气泡开关（设置页）。 */
+    overlayEnabled: Boolean = false,
+    /** 是否已授予「显示在其他应用上层」权限。 */
+    overlayPermissionGranted: Boolean = false,
+    onOverlayChange: (Boolean) -> Unit = {},
+    onRequestOverlayPermission: () -> Unit = {},
     /** 按需取图（图片只按链接预览，不落盘）；null 时不加载图片。 */
     imageFetcher: ImageFetcher? = null,
     modifier: Modifier = Modifier,
@@ -1487,6 +1520,28 @@ private fun permissionDescription(option: PermissionOption): String? = when (opt
     PERMISSION_FULL_ACCESS -> stringResource(R.string.composer_permission_full_access_desc)
     PERMISSION_AUTO, PERMISSION_AUTO_REVIEW -> stringResource(R.string.composer_permission_auto_desc)
     else -> option.description
+}
+
+/** Android 6+ 的悬浮窗权限（SYSTEM_ALERT_WINDOW 属于特殊权限，只能去系统页授权）。 */
+private fun isOverlayPermissionGranted(context: Context): Boolean =
+    Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
+
+/** 打开「显示在其他应用上层」授权页；打不开时回退到应用详情页。 */
+private fun openOverlaySettings(context: Context) {
+    val intent = Intent(
+        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+        Uri.parse("package:" + context.packageName),
+    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching { context.startActivity(intent) }.onFailure {
+        runCatching {
+            context.startActivity(
+                Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.fromParts("package", context.packageName, null),
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        }
+    }
 }
 
 /** Android 13+ 需要 POST_NOTIFICATIONS 权限；更早版本默认允许。 */
