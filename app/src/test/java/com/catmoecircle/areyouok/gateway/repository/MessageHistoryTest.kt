@@ -4,6 +4,8 @@ import com.catmoecircle.areyouok.gateway.protocol.Message
 import com.catmoecircle.areyouok.gateway.protocol.MessageImage
 import com.catmoecircle.areyouok.gateway.protocol.MessageSource
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -30,6 +32,31 @@ class MessageHistoryTest {
         assertEquals("The file was edited", row.text)
         // 合并行沿用调用记录的 seq，分页去重仍然有效。
         assertEquals(1L, row.seq)
+    }
+
+    @Test
+    fun `ptc envelope folds into the preceding tool row`() {
+        // 真机现象：工具返回图片时 DSH 把 `<path>…</path><type>image</type>` 作为
+        // user 消息注入，旧实现原样显示成灰字。它描述的是一次工具调用的产物，
+        // 应该并回「工具」行（路径 + 类型），而不是新增聊天正文。
+        val rows = listOf(
+            call(1, "run_code"),
+            result(2, "ok"),
+            Message(
+                seq = 3,
+                role = "user",
+                text = """<path>E:\Android\areyouok\.tmp\s2.png</path>""" +
+                    "\n<type>image</type>\n<content>…</content>",
+                source = MessageSource(kind = "ptc-mode"),
+            ),
+        ).toHistoryChatMessages()
+
+        assertEquals(1, rows.size)
+        val row = rows.single()
+        assertEquals(ChatRole.TOOL, row.role)
+        assertEquals("""E:\Android\areyouok\.tmp\s2.png""", row.toolPath)
+        assertEquals("image", row.toolType)
+        assertFalse(row.text.contains("<path>"))
     }
 
     @Test
@@ -189,5 +216,40 @@ class MessageHistoryTest {
         assertEquals(2, rows.size)
         assertTrue(rows.any { it.role == ChatRole.THINKING && it.text == "先看代码" })
         assertTrue(rows.any { it.role == ChatRole.ASSISTANT && it.text == "改好了" })
+    }
+
+    @Test
+    fun `tool result envelope is merged into the call row`() {
+        val envelope = """
+            <path>E:\Android\areyouok\.tmp\s2.png</path>
+            <type>image</type>
+            <content>
+            图片已保存
+            </content>
+        """.trimIndent()
+        val rows = listOf(call(1, "run_code"), result(2, envelope)).toHistoryChatMessages()
+
+        assertEquals(1, rows.size)
+        val row = rows.single()
+        assertEquals("run_code", row.meta)
+        assertEquals("图片已保存", row.text)
+        assertEquals("""E:\Android\areyouok\.tmp\s2.png""", row.toolPath)
+        assertEquals("image", row.toolType)
+        // 标签绝不能留在正文里。
+        assertFalse(row.text.contains("<path>"))
+    }
+
+    @Test
+    fun `standalone tool result envelope is parsed too`() {
+        val rows = listOf(
+            result(7, """<path>/tmp/out.log</path><content>已写入</content>"""),
+        ).toHistoryChatMessages()
+
+        val row = rows.single()
+        assertEquals(ChatRole.TOOL, row.role)
+        assertEquals("已写入", row.text)
+        assertEquals("/tmp/out.log", row.toolPath)
+        assertNull(row.toolType)
+        assertFalse(row.text.contains("<content>"))
     }
 }

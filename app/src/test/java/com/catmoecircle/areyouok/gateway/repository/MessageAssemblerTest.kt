@@ -264,4 +264,51 @@ class MessageAssemblerTest {
         assertEquals("edit", row.meta)
         assertEquals("输出", row.text)
     }
+
+    @Test
+    fun `live tool result envelope is parsed into fields`() {
+        val assembler = MessageAssembler()
+        assembler.appendTool(toolName = "run_code", callId = "call-9", summary = null, seq = 1, running = true)
+        assembler.appendTool(
+            toolName = null,
+            callId = "call-9",
+            summary = """
+                <path>/tmp/s2.png</path>
+                <type>image</type>
+                <content>
+                已生成
+                </content>
+            """.trimIndent(),
+            seq = 2,
+            running = false,
+        )
+
+        val row = assembler.snapshot().single()
+        assertEquals("已生成", row.text)
+        assertEquals("/tmp/s2.png", row.toolPath)
+        assertEquals("image", row.toolType)
+        assertFalse(row.text.contains("<path>"))
+    }
+
+    @Test
+    fun `envelope fields merge into a pending history call`() {
+        val assembler = MessageAssembler()
+        assembler.reset(
+            listOf(
+                ChatMessage(id = "tool-call-seq-1", role = ChatRole.TOOL, text = "", seq = 1, meta = "read_image"),
+            ),
+        )
+        assembler.appendTool(
+            toolName = null,
+            callId = "call-live",
+            summary = """<path>/tmp/a.png</path><type>image</type><content>ok</content>""",
+            seq = 2,
+            mergeWithPending = true,
+        )
+
+        val row = assembler.snapshot().single()
+        assertEquals("ok", row.text)
+        assertEquals("/tmp/a.png", row.toolPath)
+        assertEquals("image", row.toolType)
+    }
 }

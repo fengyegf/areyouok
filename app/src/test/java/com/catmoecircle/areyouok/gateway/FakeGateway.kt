@@ -47,6 +47,8 @@ class FakeGatewayApi : GatewayApi {
     var error: Throwable? = null
 
     val sentMessages = mutableListOf<Triple<String, String, String>>()
+    /** 每次 `POST /v1/sessions/{id}/messages` 带上的文件回执 id。 */
+    val sentFiles = mutableListOf<List<String>>()
     val answered = mutableListOf<Pair<String, JsonElement>>()
     val interruptedSessions = mutableListOf<String>()
     /** 每次 `POST /v1/sessions` 的入参：(workspaceId, cwd, title)。 */
@@ -100,9 +102,11 @@ class FakeGatewayApi : GatewayApi {
         sessionId: String,
         text: String,
         mode: String,
+        files: List<String>,
     ): OkResponse {
         maybeThrow()
         sentMessages += Triple(sessionId, text, mode)
+        sentFiles += files.toList()
         return OkResponse(ok = true, sessionId = sessionId, accepted = true)
     }
 

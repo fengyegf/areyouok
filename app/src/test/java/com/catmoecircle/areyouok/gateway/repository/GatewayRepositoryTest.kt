@@ -19,6 +19,7 @@ import com.catmoecircle.areyouok.gateway.protocol.SessionModelSelection
 import com.catmoecircle.areyouok.gateway.protocol.SessionPermissions
 import com.catmoecircle.areyouok.gateway.protocol.SessionProjectionValues
 import com.catmoecircle.areyouok.gateway.protocol.SessionProjections
+import com.catmoecircle.areyouok.gateway.protocol.SendMessageRequest
 import com.catmoecircle.areyouok.gateway.protocol.SessionSummary
 import com.catmoecircle.areyouok.gateway.protocol.Snapshot
 import com.catmoecircle.areyouok.gateway.protocol.ReadyFrame
@@ -729,6 +730,31 @@ class GatewayRepositoryTest {
 
         assertFalse(sent)
         assertTrue(repository.messages.value.none { it.text == "会失败" })
+        testScope.cancel()
+    }
+
+    @Test
+    fun `steer message targets another session without polluting the timeline`() = runTest {
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(
+                SessionSummary(id = "s1", title = "当前"),
+                SessionSummary(id = "s2", title = "后台"),
+            )
+        }
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope)
+        repository.connect(endpoint)
+        advanceUntilIdle()
+
+        // 后台悬浮气泡给「另一个会话」布置下一个任务：立即以 steer 发出，
+        // 但不切换当前会话，也不往用户眼前的时间线塞乐观气泡。
+        val sent = repository.sendMessage("继续", SendMessageRequest.MODE_STEER, "s2")
+        advanceUntilIdle()
+
+        assertTrue(sent)
+        assertEquals(Triple("s2", "继续", "steer"), transport.fakeApi.sentMessages.single())
+        assertEquals("s1", repository.selectedSessionId.value)
+        assertTrue(repository.messages.value.none { it.text == "继续" })
         testScope.cancel()
     }
 

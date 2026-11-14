@@ -33,6 +33,20 @@ class MessageMappingTest {
     }
 
     @Test
+    fun `ptc tool envelope never renders as chat text`() {
+        // PTC 模式把工具返回的图片/文件以 user 消息注入（`<path>` 信封）：
+        // 它是模型侧上下文，绝不能当系统灰字显示在聊天里。
+        val envelope = message(
+            """<path>E:\Android\areyouok\.tmp\s2.png</path>""" +
+                "\n<type>image</type>\n<content>…</content>",
+            MessageSource(kind = "ptc-mode"),
+        )
+        assertNull(MessageMapping.userRole(envelope))
+        assertTrue(MessageMapping.isPtcContext(envelope))
+        assertTrue(MessageMapping.isToolEnvelopeText(envelope.text))
+    }
+
+    @Test
     fun `background job notice is hidden from the chat timeline`() {
         // 后台任务完成通知只是上下文注入；桌面端 Chat 同样不展示，
         // 任务输出已经在工具结果行里。

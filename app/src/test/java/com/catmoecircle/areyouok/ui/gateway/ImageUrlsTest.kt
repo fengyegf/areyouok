@@ -61,4 +61,23 @@ class ImageUrlsTest {
         assertNull(markdownImageUrl("docs/shot.png", null))
         assertNull(markdownImageUrl("   ", "s-1"))
     }
+
+    @Test
+    fun `multi images use a compact grid instead of one per row`() {
+        assertEquals(2, imageGridColumns(2))
+        assertEquals(2, imageGridColumns(3))
+        assertEquals(2, imageGridColumns(4))
+        assertEquals(3, imageGridColumns(5))
+        assertEquals(3, imageGridColumns(9))
+    }
+
+    @Test
+    fun `the grid shows at most nine images`() {
+        assertEquals(0, imageGridVisibleCount(0))
+        assertEquals(1, imageGridVisibleCount(1))
+        assertEquals(4, imageGridVisibleCount(4))
+        assertEquals(9, imageGridVisibleCount(9))
+        assertEquals(9, imageGridVisibleCount(12))
+        assertEquals(0, imageGridVisibleCount(-3))
+    }
 }
