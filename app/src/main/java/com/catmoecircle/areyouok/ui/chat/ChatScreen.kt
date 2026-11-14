@@ -325,6 +325,9 @@ fun ChatScreen(modifier: Modifier = Modifier) {
 
     // 配对新网关的公共流程：配对码为空按局域网直连，否则先 POST /v1/pair 换 token。
     suspend fun performConnect(url: String, code: String, invite: PairInvite?): GatewayEndpoint {
+        // 公网 HTTPS 网关用自签证书：先把二维码里带的证书固定进 App（不写系统库），
+        // 后面的 POST /v1/pair、REST 与 wss 才能通过 TLS 校验。
+        runtime.adoptInvite(invite)
         val baseUrl = GatewayEndpoint.normalizeBaseUrl(url)
             ?: throw IllegalArgumentException(invalidUrlText)
         // 邀请里的网关名只对同一个地址有效；手改地址后不再沿用。
@@ -592,6 +595,10 @@ fun ChatScreen(modifier: Modifier = Modifier) {
                     ?: scannedInvite?.baseUrl
                     ?: invite?.name
                     ?: invite?.baseUrl,
+                // 只有公网 HTTPS 邀请才谈得上「内置证书」；局域网二维码也带指纹，但走明文 HTTP。
+                inviteFingerprint = (scannedInvite ?: invite)
+                    ?.takeIf { it.preferPublic || it.baseUrl.startsWith("https://", ignoreCase = true) }
+                    ?.fingerprint,
                 busy = pairing,
                 error = pairError,
                 notificationsEnabled = notificationsEnabled,

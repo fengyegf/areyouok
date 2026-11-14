@@ -10,6 +10,8 @@ import com.catmoecircle.areyouok.gateway.pairing.TokenStore
 import com.catmoecircle.areyouok.gateway.repository.ConnectionState
 import com.catmoecircle.areyouok.gateway.repository.GatewayRepository
 import com.catmoecircle.areyouok.gateway.transport.GatewayEndpoint
+import com.catmoecircle.areyouok.gateway.transport.GatewayPins
+import com.catmoecircle.areyouok.gateway.transport.GatewayTls
 import com.catmoecircle.areyouok.gateway.transport.OkHttpGatewayTransport
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -17,6 +19,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 
 /**
@@ -127,11 +130,43 @@ class GatewayRuntime private constructor(context: Context) {
         val withToken = endpoint.copy(
             token = endpoint.token ?: tokenStore.tokenFor(endpoint.serverId),
         )
+        // 自签证书网关：进程重启后先把上次固定的证书恢复进内存，再建连接。
+        restorePins(withToken.baseUrl)
         endpointRef.value = withToken
         settings.remember(withToken)
         repository.connect(withToken)
         // 已选定网关后不必继续 mDNS 浏览，省电。
         stopDiscovery()
+    }
+
+    /**
+     * 固定扫码邀请里的自签证书（公网 HTTPS 网关）。
+     *
+     * 证书只进 App 自己的固定表：不装进系统信任库，也不需要用户去「设置 →
+     * 安全 → 安装证书」。固定表随配对落盘，重启后 [connect] 会自动恢复。
+     * 局域网明文邀请没有证书字段，这里什么都不做。
+     */
+    fun adoptInvite(invite: PairInvite?) {
+        if (invite == null) return
+        val target = invite.publicUrl ?: invite.baseUrl
+        val host = target.toHttpUrlOrNull()?.host ?: return
+        val der = invite.certificateDer()
+        val fingerprint = GatewayTls.normalizeFingerprint(invite.fingerprint)
+            ?: der?.let { GatewayTls.fingerprintOf(it) }
+            ?: return
+        val pin = GatewayPins.install(host, der, fingerprint) ?: return
+        settings.savePinnedCertificate(host, GatewayPins.encode(pin))
+    }
+
+    /** 该网关固定过证书时返回其 SHA-256 指纹（设置页展示用）。 */
+    fun pinnedFingerprint(baseUrl: String?): String? =
+        GatewayPins.fingerprintOf(baseUrl?.toHttpUrlOrNull()?.host)
+
+    /** 按主机名恢复持久化的固定证书，避免重连公网网关时 TLS 校验失败。 */
+    private fun restorePins(baseUrl: String) {
+        val host = baseUrl.toHttpUrlOrNull()?.host ?: return
+        if (GatewayPins.lookup(host) != null) return
+        GatewayPins.installStored(host, settings.pinnedCertificate(host))
     }
 
     fun connectLast(): Boolean {

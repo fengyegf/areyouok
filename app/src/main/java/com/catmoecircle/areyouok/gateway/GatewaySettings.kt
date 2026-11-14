@@ -81,6 +81,26 @@ class GatewaySettings(context: Context) {
         return raw.split('\n').mapNotNull { RecentGateway.decode(it) }
     }
 
+    /**
+     * 自签证书固定表：键是主机名，值是 `指纹|DER base64`。
+     *
+     * 只存本 App 自己的固定信息，**不写入系统证书库**；公网网关重启后
+     * `GatewayRuntime.connect` 会按主机名恢复，TLS 握手才能继续通过。
+     */
+    fun pinnedCertificate(host: String): String? =
+        prefs.getString(pinKey(host), null)?.takeIf { it.isNotBlank() }
+
+    fun savePinnedCertificate(host: String, encoded: String) {
+        if (encoded.isBlank()) return
+        prefs.edit().putString(pinKey(host), encoded).apply()
+    }
+
+    fun clearPinnedCertificate(host: String) {
+        prefs.edit().remove(pinKey(host)).apply()
+    }
+
+    private fun pinKey(host: String): String = "pin_" + host.lowercase()
+
     fun clear() {
         prefs.edit().clear().apply()
     }

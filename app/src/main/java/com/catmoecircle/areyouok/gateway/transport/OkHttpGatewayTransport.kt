@@ -259,7 +259,18 @@ class OkHttpGatewayTransport(
 /** OkHttp 客户端工厂，保持 REST 与 WS 的超时策略分离。 */
 object GatewayHttpClients {
 
-    fun rest(): OkHttpClient = OkHttpClient.Builder()
+    /**
+     * 公网网关用自签证书：在系统默认校验之外叠加 App 内的证书固定。
+     *
+     * `sslSocketFactory` 与 `hostnameVerifier` 都换成固定感知版本：公共 CA
+     * 签发的证书行为不变；二维码里固定过的自签证书只认那一张，且不依赖
+     * 用户把证书装进系统信任库。
+     */
+    private fun pinned(): OkHttpClient.Builder = OkHttpClient.Builder()
+        .sslSocketFactory(GatewayTls.socketFactory, GatewayTls.trustManager)
+        .hostnameVerifier(GatewayTls.hostnameVerifier)
+
+    fun rest(): OkHttpClient = pinned()
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .writeTimeout(20, TimeUnit.SECONDS)
@@ -267,7 +278,7 @@ object GatewayHttpClients {
         .retryOnConnectionFailure(true)
         .build()
 
-    fun stream(): OkHttpClient = OkHttpClient.Builder()
+    fun stream(): OkHttpClient = pinned()
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .writeTimeout(20, TimeUnit.SECONDS)

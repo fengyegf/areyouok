@@ -1,6 +1,7 @@
 package com.catmoecircle.areyouok.gateway.pairing
 
 import com.catmoecircle.areyouok.gateway.transport.GatewayEndpoint
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -134,5 +135,63 @@ class PairInviteParserTest {
     fun `https endpoint uses wss`() {
         val endpoint = GatewayEndpoint(baseUrl = "https://gw.example.com:7789")
         assertEquals("wss://gw.example.com:7789/v1/stream", endpoint.wsUrl)
+    }
+
+    @Test
+    fun `public mode link prefers https and carries the certificate`() {
+        val invite = PairInviteParser.parse(
+            "dshgw://pair?mode=pub&lan=http%3A%2F%2F192.168.1.5%3A7788" +
+                "&pub=https%3A%2F%2F%5B2408%3A1%5D%3A7789&code=ABC123" +
+                "&fp=sha256%2Fabc&cert=AQIDBAU&n=FY-PC",
+        )
+        requireNotNull(invite)
+        assertEquals("https://[2408:1]:7789", invite.baseUrl)
+        assertTrue(invite.preferPublic)
+        assertEquals("http://192.168.1.5:7788", invite.lanUrl)
+        assertEquals("https://[2408:1]:7789", invite.publicUrl)
+        assertEquals("AQIDBAU", invite.certificateBase64)
+        assertArrayEquals(byteArrayOf(1, 2, 3, 4, 5), invite.certificateDer())
+        assertTrue(!invite.isLan)
+    }
+
+    @Test
+    fun `legacy link without mode still prefers the lan edge`() {
+        val invite = PairInviteParser.parse(
+            "dshgw://pair?lan=http%3A%2F%2F192.168.1.5%3A7788&pub=https%3A%2F%2F%5B2408%3A1%5D%3A7789",
+        )
+        requireNotNull(invite)
+        assertEquals("http://192.168.1.5:7788", invite.baseUrl)
+        assertTrue(!invite.preferPublic)
+        assertNull(invite.certificateBase64)
+        assertNull(invite.certificateDer())
+    }
+
+    @Test
+    fun `build emits public mode and certificate then round trips`() {
+        val link = PairInviteParser.build(
+            baseUrl = "https://[2408:1]:7789",
+            code = "XY-9",
+            fingerprint = "abc",
+            name = "FY-PC",
+            lanUrl = "http://192.168.1.5:7788",
+            publicUrl = "https://[2408:1]:7789",
+            preferPublic = true,
+            certificate = "AQID",
+        )
+        assertTrue(link.contains("mode=pub"))
+        assertTrue(link.contains("cert=AQID"))
+        val parsed = PairInviteParser.parse(link)
+        requireNotNull(parsed)
+        assertEquals("https://[2408:1]:7789", parsed.baseUrl)
+        assertTrue(parsed.preferPublic)
+        assertEquals("AQID", parsed.certificateBase64)
+    }
+
+    @Test
+    fun `malformed certificate is ignored instead of breaking the invite`() {
+        val invite = PairInviteParser.parse("dshgw://pair?pub=https%3A%2F%2Fgw%3A7789&cert=!!!!")
+        requireNotNull(invite)
+        assertEquals("!!!!", invite.certificateBase64)
+        assertNull(invite.certificateDer())
     }
 }

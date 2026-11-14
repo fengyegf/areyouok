@@ -38,6 +38,7 @@ import com.catmoecircle.areyouok.gateway.GatewaySettings
 import com.catmoecircle.areyouok.gateway.repository.ConnectionPhase
 import com.catmoecircle.areyouok.gateway.repository.ConnectionState
 import com.catmoecircle.areyouok.gateway.transport.GatewayEndpoint
+import com.catmoecircle.areyouok.gateway.transport.GatewayTls
 import com.catmoecircle.areyouok.ui.gateway.GatewayPillButton
 import com.catmoecircle.areyouok.ui.gateway.connectionStatusText
 import top.yukonga.miuix.kmp.basic.Icon
@@ -225,6 +226,7 @@ internal fun SettingsGatewayPage(
     initialUrl: String,
     initialCode: String,
     inviteLabel: String?,
+    inviteFingerprint: String? = null,
     busy: Boolean,
     error: String?,
     onSelectDiscoveredGateway: (com.catmoecircle.areyouok.gateway.discovery.DiscoveredGateway) -> Unit,
@@ -315,6 +317,21 @@ internal fun SettingsGatewayPage(
                         color = colorScheme.onSurfaceVariant,
                         fontSize = 11.sp,
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+
+                // 公网二维码自带自签证书：告知用户证书已固定进 App，不必装进系统。
+                inviteFingerprint?.takeIf { it.isNotBlank() }?.let { fingerprint ->
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = stringResource(
+                            R.string.gateway_pair_cert_pinned,
+                            GatewayTls.formatFingerprint(fingerprint),
+                        ),
+                        color = colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }

@@ -3,13 +3,16 @@ package com.catmoecircle.areyouok.gateway.pairing
 import java.net.URLDecoder
 import java.net.URLEncoder
 import com.catmoecircle.areyouok.gateway.transport.GatewayEndpoint
+import com.catmoecircle.areyouok.gateway.transport.GatewayTls
 
 /**
  * 配对二维码/深链的内容：
- * `dshgw://pair?url=<urlencoded>&lan=<http url>&pub=<https url>&code=<>&fp=<>&n=<>`。
+ * `dshgw://pair?url=<urlencoded>&lan=<http url>&pub=<https url>&mode=pub&cert=<base64url DER>&code=<>&fp=<>&n=<>`。
  *
- * 局域网优先走 `http://<ip>:7788`（明文，**不需要证书**、默认也不需要 token）；
- * 公网走 `https://…:7789`，需要配对码与证书指纹。旧版只带 `url` 的深链仍然兼容。
+ * 局域网走 `http://<ip>:7788`（明文，**不需要证书**、默认也不需要 token）；
+ * 公网走 `https://…:7789`，需要配对码与证书指纹，插件切到「公网 HTTPS」版本时
+ * 二维码还会带上自签证书本体（DER 的 base64url）：App 直接把它固定在自己进程内，
+ * **不需要把证书装进系统信任库**。旧版只带 `url` 的深链仍然兼容。
  */
 data class PairInvite(
     val baseUrl: String,
@@ -21,6 +24,10 @@ data class PairInvite(
     val lanUrl: String? = null,
     /** 二维码里的公网 HTTPS 候选。 */
     val publicUrl: String? = null,
+    /** 二维码是为公网 HTTPS 生成的（`mode=pub`），连接时优先走 HTTPS。 */
+    val preferPublic: Boolean = false,
+    /** 二维码里内嵌的自签证书（DER 的 base64url，可省略 padding）。 */
+    val certificateBase64: String? = null,
 ) {
     /** 首选明文 HTTP 基址（局域网直连，不涉及证书）。 */
     val httpUrl: String?
@@ -37,6 +44,9 @@ data class PairInvite(
 
     val isLan: Boolean get() = baseUrl.startsWith("http://", ignoreCase = true)
     val needsCode: Boolean get() = code.isBlank()
+
+    /** 二维码里内嵌的证书 DER 字节；没带或解不出来时为 null。 */
+    fun certificateDer(): ByteArray? = GatewayTls.decodeCertificate(certificateBase64)
 
     fun toEndpoint(token: String? = null): GatewayEndpoint =
         GatewayEndpoint(baseUrl = baseUrl, token = token, serverId = baseUrl, name = name)
@@ -79,10 +89,15 @@ object PairInviteParser {
         val lanRaw = params["lan"]?.takeIf { HTTP_PATTERN.containsMatchIn(it) }
         val pubRaw = params["pub"]?.takeIf { HTTP_PATTERN.containsMatchIn(it) }
         val urlRaw = params["url"] ?: params["base"] ?: params["addr"]
-        // 局域网明文 HTTP 优先；其次 url；再次公网。
-        val chosen = listOfNotNull(lanRaw, urlRaw, pubRaw)
-            .firstNotNullOfOrNull { GatewayEndpoint.normalizeBaseUrl(it) }
-            ?: return null
+        // `mode=pub` 是插件「公网 HTTPS」二维码版本的标记：优先公网，避免手机
+        // 恰好也在同一局域网时又悄悄回落到明文 HTTP。旧二维码没有 mode，保持局域网优先。
+        val modeRaw = params["mode"]?.trim()?.lowercase()
+        val preferPublic = modeRaw == "pub" || modeRaw == "public" || modeRaw == "https"
+        val chosen = if (preferPublic) {
+            listOfNotNull(pubRaw, urlRaw, lanRaw).firstNotNullOfOrNull { GatewayEndpoint.normalizeBaseUrl(it) }
+        } else {
+            listOfNotNull(lanRaw, urlRaw, pubRaw).firstNotNullOfOrNull { GatewayEndpoint.normalizeBaseUrl(it) }
+        } ?: return null
         return PairInvite(
             baseUrl = chosen,
             code = params["code"].orEmpty(),
@@ -91,6 +106,8 @@ object PairInviteParser {
             raw = text,
             lanUrl = lanRaw?.let { GatewayEndpoint.normalizeBaseUrl(it) },
             publicUrl = pubRaw?.let { GatewayEndpoint.normalizeBaseUrl(it) },
+            preferPublic = preferPublic,
+            certificateBase64 = (params["cert"] ?: params["crt"])?.takeIf { it.isNotBlank() },
         )
     }
 
@@ -121,11 +138,15 @@ object PairInviteParser {
         name: String? = null,
         lanUrl: String? = null,
         publicUrl: String? = null,
+        preferPublic: Boolean = false,
+        certificate: String? = null,
     ): String {
         val params = buildList {
             add("url=${encode(baseUrl)}")
             if (!lanUrl.isNullOrBlank()) add("lan=${encode(lanUrl)}")
             if (!publicUrl.isNullOrBlank()) add("pub=${encode(publicUrl)}")
+            if (preferPublic) add("mode=pub")
+            if (!certificate.isNullOrBlank()) add("cert=${encode(certificate)}")
             if (code.isNotBlank()) add("code=${encode(code)}")
             if (!fingerprint.isNullOrBlank()) add("fp=${encode(fingerprint)}")
             if (!name.isNullOrBlank()) add("n=${encode(name)}")
