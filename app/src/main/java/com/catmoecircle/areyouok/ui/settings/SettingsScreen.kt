@@ -148,6 +148,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onConnect: (url: String, code: String) -> Unit,
     onScan: () -> Unit,
+    onScanImage: () -> Unit,
     onDisconnect: () -> Unit,
     onConnectDevice: (GatewaySettings.RecentGateway) -> Unit,
     onSelectDiscoveredGateway: (DiscoveredGateway) -> Unit,
@@ -254,6 +255,7 @@ fun SettingsScreen(
                     onConnectDevice = onConnectDevice,
                     onDisconnectDevice = onDisconnect,
                     onAddConnection = onScan,
+                    onScanImage = onScanImage,
                 )
 
                 SettingsPage.GATEWAY -> SettingsGatewayPage(
@@ -913,6 +915,7 @@ private fun SettingsScreenPreview() {
             onBack = {},
             onConnect = { _, _ -> },
             onScan = {},
+            onScanImage = {},
             onDisconnect = {},
             onConnectDevice = {},
             onSelectDiscoveredGateway = {},

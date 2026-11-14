@@ -128,6 +128,7 @@ import com.catmoecircle.areyouok.ui.gateway.GatewayStatusDot
 import com.catmoecircle.areyouok.ui.gateway.InterventionDock
 import com.catmoecircle.areyouok.ui.gateway.ImageFetcher
 import com.catmoecircle.areyouok.ui.gateway.MessageTimeline
+import com.catmoecircle.areyouok.ui.gateway.rememberQrImageScannerLauncher
 import com.catmoecircle.areyouok.ui.gateway.rememberQrScannerLauncher
 import com.catmoecircle.areyouok.ui.settings.SettingsScreen
 import com.catmoecircle.areyouok.ui.settings.WorkStepCollapseTiming
@@ -206,6 +207,7 @@ fun ChatScreen(modifier: Modifier = Modifier) {
     // 这些文案会随重组（配置变化）更新，避免在回调里用 LocalContext 取字符串。
     val notificationDeniedText = stringResource(R.string.settings_notifications_permission_denied)
     val scanFailedText = stringResource(R.string.gateway_scan_failed)
+    val scanImageFailedText = stringResource(R.string.gateway_scan_image_failed)
     val invalidUrlText = stringResource(R.string.gateway_pair_invalid)
     val attachmentReadFailedText = stringResource(R.string.composer_attachment_read_failed)
 
@@ -341,14 +343,13 @@ fun ChatScreen(modifier: Modifier = Modifier) {
         return endpoint
     }
 
-    // 扫码入口：识别成功后直接配对/连接，不再要求用户回到网关页手动点「连接」。
-    val launchScanner = rememberQrScannerLauncher(
-        prompt = stringResource(R.string.gateway_scan_prompt),
-    ) { raw ->
+    // 扫码（相机或本地图片）识别成功后的公共处理：解析邀请后直接配对/连接，
+    // 不再要求用户回到网关页手动点「连接」。
+    fun handleScanned(raw: String) {
         val scanned = PairInviteParser.parse(raw)
         if (scanned == null) {
             Toast.makeText(context, scanFailedText, Toast.LENGTH_SHORT).show()
-            return@rememberQrScannerLauncher
+            return
         }
 
         val targetName = scanned.name
@@ -387,6 +388,17 @@ fun ChatScreen(modifier: Modifier = Modifier) {
             }
         }
     }
+
+    // 两个扫码入口：点按扫码走相机，长按扫码按钮（或设置页「从相册选择」）走本地图片。
+    val launchScanner = rememberQrScannerLauncher(
+        prompt = stringResource(R.string.gateway_scan_prompt),
+    ) { raw -> handleScanned(raw) }
+    val launchImageScanner = rememberQrImageScannerLauncher(
+        onScanned = { raw -> handleScanned(raw) },
+        onUnreadable = {
+            Toast.makeText(context, scanImageFailedText, Toast.LENGTH_SHORT).show()
+        },
+    )
 
     LaunchedEffect(Unit) {
         repository.notices.collect { notice ->
@@ -601,6 +613,7 @@ fun ChatScreen(modifier: Modifier = Modifier) {
                     }
                 },
                 onScan = launchScanner,
+                onScanImage = launchImageScanner,
                 onConnect = { url, code ->
                     pairing = true
                     pairError = null

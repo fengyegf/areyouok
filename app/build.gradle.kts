@@ -24,7 +24,7 @@ android {
         release {
             // 打开 R8：代码压缩/混淆 + 资源裁剪。release 包体积主要来自 DEX，
             // 关闭时 3 个 dex 约 30 MB；开启后会砍掉绝大部分未使用的 Compose/
-            // OkHttp/ZXing 代码。
+            // OkHttp 代码。
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -78,14 +78,21 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
-    // 扫码入口：Camera + ZXing（来自 Maven Central；无需 Google Play Services）
-    implementation(libs.zxing.android.embedded)
+    // 扫码入口：CameraX 取景 + ML Kit 二维码识别。barcode-scanning 是内置模型版本，
+    // 不依赖 Google Play Services，离线也能扫码。
+    implementation(libs.androidx.camera.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.mlkit.barcode.scanning)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)
+    // 仅测试用：仪器测试里生成二维码图片，喂给 ML Kit 验证解码链路。
+    androidTestImplementation(libs.zxing.core)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

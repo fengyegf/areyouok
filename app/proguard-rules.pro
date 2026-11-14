@@ -1,6 +1,6 @@
 # release 构建的 R8 规则。
 #
-# 大部分依赖（Compose、OkHttp、ZXing、Miuix、kotlinx.coroutines）自带 consumer
+# 大部分依赖（Compose、OkHttp、ML Kit、Miuix、kotlinx.coroutines）自带 consumer
 # 规则，这里只补三类：kotlinx.serialization 的 serializer 入口、少数反射/动态
 # 加载路径，以及压制第三方可选依赖的 missing-class 警告。
 
@@ -27,8 +27,9 @@
 # DebugProbes 只在调试器下使用，release 不需要。
 -dontwarn kotlinx.coroutines.**
 
-# ---------------- ZXing (zxing-android-embedded) ----------------
-# CaptureActivity 由 Manifest 声明，AAPT 会自动 keep；这里额外兜底扫码结果的
-# 回调接口，避免 R8 把仅由库内部调用的接口合并掉。
--keep interface com.journeyapps.barcodescanner.BarcodeCallback { *; }
+# ---------------- ML Kit（barcode-scanning，内置模型） ----------------
+# ML Kit 的 AAR 自带 consumer 规则（模型入口与 native 绑定都在里面），业务侧不用
+# 再 keep；它引用的 Play Services 可选类在离线打包时并不存在，压掉这些告警即可。
+-dontwarn com.google.mlkit.**
+-dontwarn com.google.android.gms.**
 

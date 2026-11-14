@@ -106,6 +106,9 @@
     <string name="gateway_sessions_expand_more">展开其余 %1$d 个对话</string>
     <string name="gateway_sessions_collapse">收起</string>
     <string name="gateway_scan_button">扫描二维码</string>
+    <string name="gateway_scan_image">从相册选择</string>
+    <string name="gateway_scan_image_desc">识别手机里的二维码截图，不用打开相机</string>
+    <string name="gateway_scan_image_failed">图片里没有识别到二维码，换一张或直接用相机扫</string>
     <string name="gateway_scan_prompt">对准电脑上的 DSH 网关二维码</string>
     <string name="gateway_scan_failed">二维码里没有可用的网关地址，请手动输入</string>
 
@@ -240,4 +243,12 @@
     <!-- 工具结果里的文件路径（DSH <path>/<type>/<content> 信封） -->
     <string name="gateway_tool_file">文件</string>
     <string name="gateway_tool_image">图片</string>
+
+    <!-- 扫码取景页（CameraX + ML Kit） -->
+    <string name="gateway_scan_close">关闭扫码</string>
+    <string name="gateway_scan_camera_denied">没有相机权限，无法扫码</string>
+    <string name="gateway_scan_camera_denied_hint">在系统设置里允许相机权限后可以重试；也可以返回手动输入网关地址。</string>
+    <string name="gateway_scan_open_settings">去设置</string>
+    <string name="gateway_scan_camera_failed">相机启动失败，请重试或从相册选择</string>
+    <string name="gateway_scan_picking">正在识别图片…</string>
 </resources>

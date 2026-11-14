@@ -12,7 +12,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- 扫码配对：Camera（zxing-android-embedded 的 CaptureActivity） -->
+    <!-- 扫码配对：相机（CameraX 预览 + ML Kit 识别二维码） -->
     <uses-permission android:name="android.permission.CAMERA" />
     <!-- 后台悬浮气泡：审批 / 提问 / 任务完成直接显示在其他应用上层 -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
@@ -61,16 +61,18 @@
             </intent-filter>
         </activity>
 
+        <!-- 扫码取景页：CameraX 预览 + ML Kit 识别；固定竖屏，与 App 其余页面一致 -->
+        <activity
+            android:name=".ui.gateway.QrScanActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.AreYouOK" />
+
         <service
             android:name=".gateway.service.GatewayService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
-        <!-- zxing-android-embedded 的扫码界面：库默认 sensorLandscape，这里覆盖成竖屏 -->
-        <activity
-            android:name="com.journeyapps.barcodescanner.CaptureActivity"
-            android:screenOrientation="portrait"
-            tools:replace="android:screenOrientation" />
     </application>
 
 </manifest>

@@ -45,13 +45,15 @@ import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.AddCircle
 import top.yukonga.miuix.kmp.icon.extended.Lock
 import top.yukonga.miuix.kmp.icon.extended.Ok
+import top.yukonga.miuix.kmp.icon.extended.Photos
 import top.yukonga.miuix.kmp.icon.extended.ScreenMirroring
 import top.yukonga.miuix.kmp.icon.extended.SearchDevice
 import top.yukonga.miuix.kmp.icon.extended.Settings
 import top.yukonga.miuix.kmp.icon.extended.Unlock
 
 /**
- * 连接子页：已连接/曾连接的设备列表 + 每行一个连接开关，底部「添加连接」直接唤起扫码。
+ * 连接子页：已连接/曾连接的设备列表 + 每行一个连接开关，底部「添加连接」唤起相机扫码，
+ * 下一行「从相册选择」直接识别手机里的二维码图片。
  *
  * 同一时间只保留一条网关长连接，所以开关是「单选」语义：打开某个设备会连上它，
  * 关闭当前设备会断开；已配对的设备用本地保存的 token 直接重连。
@@ -64,6 +66,7 @@ internal fun SettingsConnectionPage(
     onConnectDevice: (GatewaySettings.RecentGateway) -> Unit,
     onDisconnectDevice: () -> Unit,
     onAddConnection: () -> Unit,
+    onScanImage: () -> Unit,
 ) {
     SettingsPageScaffold(title = stringResource(R.string.settings_page_connection)) {
         SettingsGroup(title = stringResource(R.string.settings_section_connection)) {
@@ -86,6 +89,14 @@ internal fun SettingsConnectionPage(
                 title = stringResource(R.string.settings_add_connection),
                 description = stringResource(R.string.settings_add_connection_desc),
                 onClick = onAddConnection,
+                enabled = !busy,
+            )
+
+            SettingsNavRow(
+                icon = MiuixIcons.Regular.Photos,
+                title = stringResource(R.string.gateway_scan_image),
+                description = stringResource(R.string.gateway_scan_image_desc),
+                onClick = onScanImage,
                 enabled = !busy,
             )
         }
