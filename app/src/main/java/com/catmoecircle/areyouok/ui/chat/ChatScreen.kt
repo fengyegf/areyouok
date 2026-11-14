@@ -1,6 +1,7 @@
 package com.catmoecircle.areyouok.ui.chat
 
 import android.Manifest
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -257,9 +258,9 @@ fun ChatScreen(modifier: Modifier = Modifier) {
     var notificationPermissionGranted by remember {
         mutableStateOf(isNotificationPermissionGranted(context))
     }
-    // 后台悬浮气泡：开关 + 系统「显示在其他应用上层」权限。
-    var overlayEnabled by remember { mutableStateOf(runtime.settings.overlayBubblesEnabled) }
-    var overlayPermissionGranted by remember { mutableStateOf(isOverlayPermissionGranted(context)) }
+    // 通知气泡：在设置页里开关；是否以气泡显示由系统决定。
+    var bubbleEnabled by remember { mutableStateOf(runtime.settings.bubbleNotificationsEnabled) }
+    var bubblesAllowed by remember { mutableStateOf(areNotificationBubblesAllowed(context)) }
     // 记录是否已经在设置页点过授权：第一次被拒只提示，再次被拒（系统不再弹窗）才兜底去系统设置。
     var permissionDeniedOnce by rememberSaveable { mutableStateOf(false) }
     var knownDevices by remember { mutableStateOf(runtime.settings.recent()) }
@@ -270,13 +271,22 @@ fun ChatScreen(modifier: Modifier = Modifier) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 notificationPermissionGranted = isNotificationPermissionGranted(context)
-                // 用户可能刚从「显示在其他应用上层」授权页回来：重算状态并让气泡生效。
-                overlayPermissionGranted = isOverlayPermissionGranted(context)
-                if (overlayEnabled) GatewayService.refreshOverlay(context)
+                // 用户可能刚从系统气泡设置页回来：重算气泡状态并让通知按新开关重发。
+                bubblesAllowed = areNotificationBubblesAllowed(context)
+                GatewayService.refreshNotifications(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    /** 开启气泡提醒：写开关、刷新通知；系统没允许气泡时把用户带到系统设置页。 */
+    fun enableBubbleAlerts() {
+        runtime.settings.bubbleNotificationsEnabled = true
+        bubbleEnabled = true
+        GatewayService.refreshNotifications(context)
+        bubblesAllowed = areNotificationBubblesAllowed(context)
+        if (!bubblesAllowed) openBubbleSettings(context)
     }
 
     // 首启拒绝通知权限后，用户仍可在设置页重新授权：这里再申请一次。
@@ -555,18 +565,18 @@ fun ChatScreen(modifier: Modifier = Modifier) {
             onSelectPermission = { preset ->
                 scope.launch { repository.selectPermission(preset) }
             },
-            overlayEnabled = overlayEnabled,
-            overlayPermissionGranted = overlayPermissionGranted,
-            onOverlayChange = { enabled ->
-                overlayEnabled = enabled
-                runtime.settings.overlayBubblesEnabled = enabled
-                if (enabled && !overlayPermissionGranted) {
-                    // 先引导授权；授权回来后在 ON_RESUME 里自动生效。
-                    openOverlaySettings(context)
+            bubbleEnabled = bubbleEnabled,
+            bubblesAllowed = bubblesAllowed,
+            onBubbleChange = { enabled ->
+                if (enabled) {
+                    enableBubbleAlerts()
+                } else {
+                    bubbleEnabled = false
+                    runtime.settings.bubbleNotificationsEnabled = false
+                    GatewayService.refreshNotifications(context)
                 }
-                GatewayService.refreshOverlay(context)
             },
-            onRequestOverlayPermission = { openOverlaySettings(context) },
+            onRequestBubbleSettings = { enableBubbleAlerts() },
             discoveredGateways = discoveredGateways,
             onSelectGateway = { gateway ->
                 gateway.baseUrl?.let { url -> runtime.connectTo(url, gateway.name) }
@@ -606,8 +616,8 @@ fun ChatScreen(modifier: Modifier = Modifier) {
                 notifyQuestions = notifyQuestions,
                 notifyCompletion = notifyCompletion,
                 notificationPermissionGranted = notificationPermissionGranted,
-                overlayEnabled = overlayEnabled,
-                overlayPermissionGranted = overlayPermissionGranted,
+                bubbleEnabled = bubbleEnabled,
+                bubblesAllowed = bubblesAllowed,
                 workStepDisplay = workStepDisplay,
                 workStepCollapseTiming = workStepCollapseTiming,
                 workStepFoldedReplies = workStepFoldedReplies,
@@ -678,14 +688,20 @@ fun ChatScreen(modifier: Modifier = Modifier) {
                 onCompletionChange = { enabled ->
                     notifyCompletion = enabled
                     runtime.settings.notifyCompletion = enabled
+                    // 关掉「任务完成提醒」后，把已经挂在通知栏/气泡里的完成通知一起撤掉
+                    // （服务端的 refresh 里已按开关做撤销，这里只负责触发一次）。
+                    GatewayService.refreshNotifications(context)
                 },
-                onOverlayChange = { enabled ->
-                    overlayEnabled = enabled
-                    runtime.settings.overlayBubblesEnabled = enabled
-                    if (enabled && !overlayPermissionGranted) openOverlaySettings(context)
-                    GatewayService.refreshOverlay(context)
+                onBubbleChange = { enabled ->
+                    if (enabled) {
+                        enableBubbleAlerts()
+                    } else {
+                        bubbleEnabled = false
+                        runtime.settings.bubbleNotificationsEnabled = false
+                        GatewayService.refreshNotifications(context)
+                    }
                 },
-                onRequestOverlayPermission = { openOverlaySettings(context) },
+                onRequestBubbleSettings = { enableBubbleAlerts() },
                 onWorkStepDisplayChange = { level ->
                     workStepDisplay = level
                     runtime.settings.workStepDisplay = level.name
@@ -706,8 +722,12 @@ fun ChatScreen(modifier: Modifier = Modifier) {
                     }
                 },
                 onOpenNotificationSettings = { openNotificationSettings(context) },
+                onOpenNotificationManagement = { openNotificationManagement(context) },
+                onOpenBackgroundPopupSettings = { openBackgroundPopupSettings(context) },
+                backgroundPopupSupported = isMiuiDevice(),
             )
         }
+
     }
 }
 
@@ -744,12 +764,12 @@ fun ChatScreenContent(
     workStepDisplay: WorkStepDisplay = WorkStepDisplay.DEFAULT,
     workStepCollapseTiming: WorkStepCollapseTiming = WorkStepCollapseTiming.DEFAULT,
     workStepFoldedReplies: WorkStepFoldedReplies = WorkStepFoldedReplies.DEFAULT,
-    /** 后台悬浮气泡开关（设置页）。 */
-    overlayEnabled: Boolean = false,
-    /** 是否已授予「显示在其他应用上层」权限。 */
-    overlayPermissionGranted: Boolean = false,
-    onOverlayChange: (Boolean) -> Unit = {},
-    onRequestOverlayPermission: () -> Unit = {},
+    /** 通知气泡开关（设置页）。 */
+    bubbleEnabled: Boolean = false,
+    /** 系统是否允许本应用使用气泡通知。 */
+    bubblesAllowed: Boolean = false,
+    onBubbleChange: (Boolean) -> Unit = {},
+    onRequestBubbleSettings: () -> Unit = {},
     /** 按需取图（图片只按链接预览，不落盘）；null 时不加载图片。 */
     imageFetcher: ImageFetcher? = null,
     modifier: Modifier = Modifier,
@@ -873,7 +893,7 @@ fun ChatScreenContent(
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .windowInsetsPadding(WindowInsets.statusBars)
-                    .padding(start = 16.dp, top = 12.dp)
+                    .padding(start = 16.dp, top = 12.dp),
             )
 
             ConnectionPill(
@@ -1640,16 +1660,85 @@ private fun permissionDescription(option: PermissionOption): String? = when (opt
     else -> option.description
 }
 
-/** Android 6+ 的悬浮窗权限（SYSTEM_ALERT_WINDOW 属于特殊权限，只能去系统页授权）。 */
-private fun isOverlayPermissionGranted(context: Context): Boolean =
-    Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
+/**
+ * 「审批与提问」渠道此刻是否允许气泡（渠道开关 + 系统对该应用的气泡总开关）。
+ *
+ * 气泡走系统通知，不需要悬浮窗权限；用户关掉时通知照常显示，只是不冒气泡。
+ */
+@Suppress("DEPRECATION")
+private fun areNotificationBubblesAllowed(context: Context): Boolean {
+    val manager = context.getSystemService(NotificationManager::class.java) ?: return false
+    val channelAllows = manager.getNotificationChannel(GatewayChannels.INTERVENTIONS)?.canBubble() == true
+    return channelAllows || manager.areBubblesAllowed()
+}
 
-/** 打开「显示在其他应用上层」授权页；打不开时回退到应用详情页。 */
-private fun openOverlaySettings(context: Context) {
-    val intent = Intent(
-        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-        Uri.parse("package:" + context.packageName),
-    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+/** 打开系统的「气泡」设置页；MIUI 走它自己的气泡通知页，打不开时回退到通知设置 / 应用详情页。 */
+private fun openBubbleSettings(context: Context) {
+    if (isMiuiDevice() && openMiuiBubbleSettings(context)) return
+    val bubbleIntent = Intent(Settings.ACTION_APP_NOTIFICATION_BUBBLE_SETTINGS)
+        .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching { context.startActivity(bubbleIntent) }.onFailure {
+        runCatching {
+            context.startActivity(
+                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        }.onFailure {
+            runCatching {
+                context.startActivity(
+                    Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.fromParts("package", context.packageName, null),
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }
+        }
+    }
+}
+
+/** 是否 MIUI / HyperOS：「气泡通知」与「后台弹出界面」都是 MIUI 专属页面。 */
+private fun isMiuiDevice(): Boolean = Build.MANUFACTURER.equals("Xiaomi", ignoreCase = true)
+
+/**
+ * 打开 MIUI 的「气泡通知」设置页。
+ *
+ * HyperOS 上标准的 `ACTION_APP_NOTIFICATION_BUBBLE_SETTINGS` 没有对应页面（直接抛
+ * ActivityNotFound），但 securitycenter 里有系统自己的气泡通知页。
+ */
+private fun openMiuiBubbleSettings(context: Context): Boolean = runCatching {
+    context.startActivity(
+        Intent()
+            .setClassName("com.miui.securitycenter", "com.miui.bubbles.settings.BubbleSettingsActivity")
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+    )
+}.isSuccess
+
+/** 打开系统的「通知管理」页（通知总开关 / 应用列表），而不是单个应用的通知渠道页。 */
+private fun openNotificationManagement(context: Context) {
+    // 系统「通知管理」页（应用列表 / 总开关）；没有对应常量，用官方 action 字面量。
+    val intent = Intent("android.settings.NOTIFICATION_SETTINGS")
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching { context.startActivity(intent) }.onFailure { openNotificationSettings(context) }
+}
+
+/**
+ * 打开 MIUI 的「后台弹出界面」权限页（应用权限编辑器，开关在「其他权限」里）。
+ *
+ * 没有这个权限时，系统会在拉起气泡 Activity 那一步直接拒绝（Permission Denied /
+ * result 102），气泡展开就是一片白板；打开后点气泡才能进到对话界面。
+ */
+private fun openBackgroundPopupSettings(context: Context) {
+    val intent = Intent("miui.intent.action.APP_PERM_EDITOR").apply {
+        setClassName(
+            "com.miui.securitycenter",
+            "com.miui.permcenter.permissions.PermissionsEditorActivity",
+        )
+        putExtra("extra_pkgname", context.packageName)
+        putExtra("extra_pkg_name", context.packageName)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
     runCatching { context.startActivity(intent) }.onFailure {
         runCatching {
             context.startActivity(

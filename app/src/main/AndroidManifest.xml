@@ -14,8 +14,6 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 扫码配对：相机（CameraX 预览 + ML Kit 识别二维码） -->
     <uses-permission android:name="android.permission.CAMERA" />
-    <!-- 后台悬浮气泡：审批 / 提问 / 任务完成直接显示在其他应用上层 -->
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <uses-feature
         android:name="android.hardware.wifi"
@@ -60,6 +58,17 @@
                     android:scheme="dshgw" />
             </intent-filter>
         </activity>
+
+        <!-- 通知气泡展开后的对话窗口：必须可调整大小且可嵌入，否则系统只会显示成普通通知 -->
+        <activity
+            android:name=".ui.gateway.BubbleActivity"
+            android:allowEmbedded="true"
+            android:documentLaunchMode="always"
+            android:exported="true"
+            android:label="@string/title_activity_bubble"
+            android:resizeableActivity="true"
+            android:theme="@style/Theme.AreYouOK"
+            android:windowSoftInputMode="adjustResize" />
 
         <!-- 扫码取景页：CameraX 预览 + ML Kit 识别；固定竖屏，与 App 其余页面一致 -->
         <activity

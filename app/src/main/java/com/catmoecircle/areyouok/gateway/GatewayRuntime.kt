@@ -88,7 +88,7 @@ class GatewayRuntime private constructor(context: Context) {
      */
     private val _appVisible = MutableStateFlow(false)
 
-    /** 前台/后台状态（可观察）：后台悬浮窗据此在 App 回到前台时自动收起。 */
+    /** 前台/后台状态（可观察）：决定是否还要发「任务完成」等后台提醒。 */
     val appVisibleFlow: StateFlow<Boolean> = _appVisible.asStateFlow()
 
     val appVisible: Boolean get() = _appVisible.value

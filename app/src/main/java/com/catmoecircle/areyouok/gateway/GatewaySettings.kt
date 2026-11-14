@@ -57,13 +57,15 @@ class GatewaySettings(context: Context) {
         set(value) = prefs.edit().putBoolean(KEY_NOTIFY_COMPLETION, value).apply()
 
     /**
-     * 后台悬浮气泡：App 不在前台时，用悬浮窗显示审批/提问/完成提醒。
+     * 通知气泡：把审批 / 提问 / 完成提醒以系统通知气泡（BubbleMetadata）显示。
      *
-     * 默认关闭（需要用户显式开启，并单独授予 SYSTEM_ALERT_WINDOW 权限）。
+     * 默认关闭，必须由用户点一次「激活气泡」才启用：气泡需要系统侧的授权
+     * （首次显示气泡时系统会弹权限框），静默打开只会让用户不知道发生了什么。
+     * 气泡完全由系统通知承载：不需要悬浮窗权限，用户随时可以在系统设置里关掉。
      */
-    var overlayBubblesEnabled: Boolean
-        get() = prefs.getBoolean(KEY_OVERLAY_BUBBLES, false)
-        set(value) = prefs.edit().putBoolean(KEY_OVERLAY_BUBBLES, value).apply()
+    var bubbleNotificationsEnabled: Boolean
+        get() = prefs.getBoolean(KEY_BUBBLE_NOTIFICATIONS, false)
+        set(value) = prefs.edit().putBoolean(KEY_BUBBLE_NOTIFICATIONS, value).apply()
 
     fun remember(endpoint: GatewayEndpoint) {
         lastBaseUrl = endpoint.baseUrl
@@ -134,7 +136,7 @@ class GatewaySettings(context: Context) {
         private const val KEY_NOTIFY_APPROVALS = "notify_approvals"
         private const val KEY_NOTIFY_QUESTIONS = "notify_questions"
         private const val KEY_NOTIFY_COMPLETION = "notify_completion"
-        private const val KEY_OVERLAY_BUBBLES = "overlay_bubbles_enabled"
+        private const val KEY_BUBBLE_NOTIFICATIONS = "bubble_notifications_enabled"
         private const val KEY_RECENT = "recent_gateways"
         private const val MAX_RECENT = 8
     }

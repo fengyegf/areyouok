@@ -58,6 +58,8 @@
     <string name="settings_notifications_completion_desc">对话跑完一轮后弹窗提醒，点通知回到对应对话</string>
     <string name="settings_notifications_system_title">审批、提问与任务完成通知设置</string>
     <string name="settings_notifications_system_desc">在系统设置中开启悬浮通知和声音</string>
+    <string name="settings_background_popup_title">后台弹出界面</string>
+    <string name="settings_background_popup_desc">允许气泡在 App 位于后台时打开界面；MIUI 上未开启时点气泡会白屏</string>
     <string name="settings_about_title">基础信息</string>
     <string name="settings_app_label">应用</string>
     <string name="settings_device_name">设备名称</string>
@@ -219,14 +221,27 @@
     <string name="composer_full_access_confirm">启用完全权限</string>
     <string name="composer_cancel">取消</string>
 
-    <!-- 后台悬浮窗（overlay bubbles） -->
-    <string name="settings_overlay_section">后台悬浮窗</string>
-    <string name="settings_overlay_enabled_title">悬浮气泡</string>
-    <string name="settings_overlay_enabled_desc">App 在后台时，以贴边气泡显示审批、提问和完成提醒，可直接回答或继续布置任务</string>
-    <string name="settings_overlay_permission_title">悬浮窗权限</string>
-    <string name="settings_overlay_permission_granted">已授权</string>
-    <string name="settings_overlay_permission_missing">未授权，点按开启</string>
-    <string name="settings_overlay_permission_hint">需要「显示在其他应用上层」权限才能显示悬浮气泡；未授权时仍使用通知栏提醒。</string>
+    <!-- 通知气泡（系统气泡通知，不使用悬浮窗权限） -->
+    <string name="settings_bubbles_section">通知气泡</string>
+    <string name="settings_bubbles_enabled_title">气泡提醒</string>
+    <string name="settings_bubbles_enabled_desc">首次使用需要点一次激活；审批、提问和任务完成以系统通知气泡显示，系统不支持时自动退回普通通知</string>
+    <string name="settings_bubbles_activate_title">激活气泡</string>
+    <string name="settings_bubbles_activate_desc">点一次打开系统气泡设置，允许本应用使用气泡</string>
+    <string name="settings_bubbles_activated">已激活</string>
+    <string name="settings_bubbles_not_activated">未激活，点按激活</string>
+    <string name="bubbles_activate_unsupported">当前系统不允许本应用使用气泡，已改用普通通知；审批和回复按钮不受影响</string>
+    <string name="title_activity_bubble">对话</string>
+
+    <!-- 常驻「对话窗口」气泡：有气泡授权时默认存在，和临时提醒气泡不同，不随审批结束消失 -->
+    <string name="bubble_conversation_subtitle">对话窗口</string>
+    <string name="bubble_conversation_running">正在运行 · 点按查看</string>
+    <string name="bubble_conversation_idle">点按继续对话</string>
+    <string name="bubble_needs_approval">需要授权：%1$s</string>
+    <string name="bubble_needs_answer">需要回答：%1$s</string>
+    <string name="bubble_action_unknown">点按打开对话</string>
+    <string name="bubble_loading">正在打开对话…</string>
+    <string name="bubble_unavailable">这个对话暂时打不开，等网关连上后再试</string>
+    <string name="bubble_open_app">打开 App</string>
 
     <!-- 运行中追加提问：立即发送 / 回答完成后追加 -->
     <string name="composer_send_mode_title">这条消息怎么发？</string>

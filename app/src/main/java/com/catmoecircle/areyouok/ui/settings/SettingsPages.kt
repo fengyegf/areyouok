@@ -1,5 +1,8 @@
 package com.catmoecircle.areyouok.ui.settings
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -403,8 +406,9 @@ internal fun SettingsGatewayPage(
 }
 
 /**
- * 通知子页：权限入口 + 通知总开关 + 审批 / 提问 / 任务完成提醒。
+ * 通知子页：气泡提醒（置顶）+ 权限入口 + 通知总开关 + 审批 / 提问 / 任务完成提醒。
  *
+ * 气泡提醒打开时向下展开「激活气泡」，关闭时收起，避免无效入口占位。
  * 未授权时点「通知权限」会重新走系统授权（ChatScreen 里实现）；被永久拒绝时
  * ChatScreen 会兜底跳到系统通知设置，避免第一次取消授权后找不到入口。
  */
@@ -415,21 +419,60 @@ internal fun SettingsNotificationPage(
     notifyQuestions: Boolean,
     notifyCompletion: Boolean,
     permissionGranted: Boolean,
-    overlayEnabled: Boolean,
-    overlayPermissionGranted: Boolean,
+    bubbleEnabled: Boolean,
+    bubblesAllowed: Boolean,
     onRequestPermission: () -> Unit,
     onOpenSystemSettings: () -> Unit,
+    onOpenNotificationManagement: () -> Unit,
+    onOpenBackgroundPopupSettings: () -> Unit,
+    backgroundPopupSupported: Boolean,
     onNotificationsChange: (Boolean) -> Unit,
     onApprovalsChange: (Boolean) -> Unit,
     onQuestionsChange: (Boolean) -> Unit,
     onCompletionChange: (Boolean) -> Unit,
-    onOverlayChange: (Boolean) -> Unit,
-    onRequestOverlayPermission: () -> Unit,
+    onBubbleChange: (Boolean) -> Unit,
+    onRequestBubbleSettings: () -> Unit,
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val childEnabled = notificationsEnabled && permissionGranted
 
     SettingsPageScaffold(title = stringResource(R.string.settings_page_notifications)) {
+        // 气泡提醒置顶：打开后向下展开「激活气泡」，关闭时整体收起。
+        SettingsGroup(title = stringResource(R.string.settings_bubbles_section)) {
+            SettingsSwitchRow(
+                title = stringResource(R.string.settings_bubbles_enabled_title),
+                description = stringResource(R.string.settings_bubbles_enabled_desc),
+                checked = bubbleEnabled,
+                onCheckedChange = onBubbleChange,
+            )
+            AnimatedVisibility(
+                visible = bubbleEnabled,
+                enter = expandVertically(),
+                exit = shrinkVertically(),
+            ) {
+                Column {
+                    SettingsNavRow(
+                        icon = if (bubbleEnabled && bubblesAllowed) {
+                            MiuixIcons.Regular.Unlock
+                        } else {
+                            MiuixIcons.Regular.Lock
+                        },
+                        title = stringResource(R.string.settings_bubbles_activate_title),
+                        description = stringResource(R.string.settings_bubbles_activate_desc),
+                        value = if (bubbleEnabled && bubblesAllowed) {
+                            stringResource(R.string.settings_bubbles_activated)
+                        } else {
+                            stringResource(R.string.settings_bubbles_not_activated)
+                        },
+                        valueColor = if (bubbleEnabled && bubblesAllowed) null else colorScheme.error,
+                        onClick = onRequestBubbleSettings,
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(32.dp))
+
         SettingsGroup {
             SettingsNavRow(
                 icon = if (permissionGranted) MiuixIcons.Regular.Unlock else MiuixIcons.Regular.Lock,
@@ -440,7 +483,8 @@ internal fun SettingsNotificationPage(
                     stringResource(R.string.settings_notifications_permission_not_granted)
                 },
                 valueColor = if (permissionGranted) null else colorScheme.error,
-                onClick = onRequestPermission,
+                // 权限入口直接进系统的「通知管理」页，和下面的审批/提问/任务渠道分开。
+                onClick = onOpenNotificationManagement,
             )
             SettingsNavRow(
                 icon = MiuixIcons.Regular.Settings,
@@ -448,6 +492,15 @@ internal fun SettingsNotificationPage(
                 description = stringResource(R.string.settings_notifications_system_desc),
                 onClick = onOpenSystemSettings,
             )
+            // MIUI 专属：气泡被系统在「后台弹出界面」这一档拦掉，单独给个入口去开。
+            if (backgroundPopupSupported) {
+                SettingsNavRow(
+                    icon = MiuixIcons.Regular.Settings,
+                    title = stringResource(R.string.settings_background_popup_title),
+                    description = stringResource(R.string.settings_background_popup_desc),
+                    onClick = onOpenBackgroundPopupSettings,
+                )
+            }
         }
 
         Spacer(Modifier.height(12.dp))
@@ -490,42 +543,6 @@ internal fun SettingsNotificationPage(
                 enabled = childEnabled,
             )
         }
-
-        Spacer(Modifier.height(32.dp))
-
-        // 后台悬浮窗：App 不在前台时把审批/提问/完成提醒做成贴边气泡。
-        SettingsGroup(title = stringResource(R.string.settings_overlay_section)) {
-            SettingsSwitchRow(
-                title = stringResource(R.string.settings_overlay_enabled_title),
-                description = stringResource(R.string.settings_overlay_enabled_desc),
-                checked = overlayEnabled,
-                onCheckedChange = onOverlayChange,
-            )
-            SettingsNavRow(
-                icon = if (overlayPermissionGranted) {
-                    MiuixIcons.Regular.Unlock
-                } else {
-                    MiuixIcons.Regular.Lock
-                },
-                title = stringResource(R.string.settings_overlay_permission_title),
-                value = if (overlayPermissionGranted) {
-                    stringResource(R.string.settings_overlay_permission_granted)
-                } else {
-                    stringResource(R.string.settings_overlay_permission_missing)
-                },
-                valueColor = if (overlayPermissionGranted) null else colorScheme.error,
-                onClick = onRequestOverlayPermission,
-            )
-        }
-
-        Spacer(Modifier.height(12.dp))
-        Text(
-            text = stringResource(R.string.settings_overlay_permission_hint),
-            color = colorScheme.onSurfaceVariant,
-            fontSize = 13.sp,
-            lineHeight = 18.sp,
-            modifier = Modifier.padding(horizontal = 16.dp),
-        )
     }
 }
 

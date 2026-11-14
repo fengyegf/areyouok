@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 通知气泡图标：系统会把它裁成圆形，深底白图在浅色 / 深色气泡上都可辨认。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FF1C1C1E"
+        android:pathData="M12,0a12,12 0,1 0,0 24a12,12 0,0 0,0 -24z" />
+    <group
+        android:pivotX="12"
+        android:pivotY="12"
+        android:scaleX="0.66"
+        android:scaleY="0.66">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M12,2.6a9.4,9.4 0,1 0,0 18.8a9.4,9.4 0,0 0,0 -18.8zM12,4.6a7.4,7.4 0,1 1,0 14.8a7.4,7.4 0,0 1,0 -14.8zM8.6,8.2a1.2,1.2 0,0 1,1.2 1.2v5.2a1.2,1.2 0,0 1,-2.4 0V9.4a1.2,1.2 0,0 1,1.2 -1.2zM15.4,8.2a1.2,1.2 0,0 1,1.2 1.2v5.2a1.2,1.2 0,0 1,-2.4 0V9.4a1.2,1.2 0,0 1,1.2 -1.2z" />
+    </group>
+</vector>

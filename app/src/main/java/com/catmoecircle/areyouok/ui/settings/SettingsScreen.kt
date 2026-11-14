@@ -117,10 +117,11 @@ internal enum class SettingsPage(@StringRes val titleRes: Int) {
  * - 连接页：已连接过的设备 + 连接开关，末尾「添加连接」直接唤起扫码；
  * - 网关页：自动发现同一局域网的 DSH 网关（点一下直连）+ 地址 / 配对码手动连接；
  * - 工作步骤显示：聊天里工具调用细节的 4 个档位（简洁 / 标准 / 详细 / 完全展开）；
- * - 通知页：通知权限（未授权时点击授权）、通知总开关、审批 / 提问提醒；
+ * - 通知页：气泡提醒（置顶，开启后展开「激活气泡」）、通知权限、通知总开关、审批 / 提问 / 完成提醒；
  * - 关于页：应用名、设备名、版本号。
  *
- * 扫码 / 深链带入的邀请由调用方通过 [initialUrl]、[initialCode]、[inviteLabel] 预填；
+ * 扫码 / 深链带入的邀请由调用方通过 [initialUrl]、[initialCode]、[inviteLabel]、
+ * [inviteFingerprint] 预填（指纹说明公网自签证书已固定进 App）；
  * 配对失败时 [error] 会把页面自动切到网关页，方便用户改地址/配对码后重试；
  * 配对请求进行中（[busy]）时禁止返回，避免页面关掉但请求还在飞。
  */
@@ -140,8 +141,8 @@ fun SettingsScreen(
     notifyQuestions: Boolean,
     notifyCompletion: Boolean,
     notificationPermissionGranted: Boolean,
-    overlayEnabled: Boolean,
-    overlayPermissionGranted: Boolean,
+    bubbleEnabled: Boolean,
+    bubblesAllowed: Boolean,
     workStepDisplay: WorkStepDisplay,
     workStepCollapseTiming: WorkStepCollapseTiming,
     workStepFoldedReplies: WorkStepFoldedReplies,
@@ -158,13 +159,19 @@ fun SettingsScreen(
     onApprovalsChange: (Boolean) -> Unit,
     onQuestionsChange: (Boolean) -> Unit,
     onCompletionChange: (Boolean) -> Unit,
-    onOverlayChange: (Boolean) -> Unit,
-    onRequestOverlayPermission: () -> Unit,
+    onBubbleChange: (Boolean) -> Unit,
+    onRequestBubbleSettings: () -> Unit,
     onWorkStepDisplayChange: (WorkStepDisplay) -> Unit,
     onWorkStepCollapseTimingChange: (WorkStepCollapseTiming) -> Unit,
     onWorkStepFoldedRepliesChange: (WorkStepFoldedReplies) -> Unit,
     onRequestNotificationPermission: () -> Unit,
     onOpenNotificationSettings: () -> Unit,
+    /** 打开系统的「通知管理」页（不是应用通知渠道页）。 */
+    onOpenNotificationManagement: () -> Unit,
+    /** 打开 MIUI 的「后台弹出界面」权限页；非 MIUI 机型不显示该入口。 */
+    onOpenBackgroundPopupSettings: () -> Unit,
+    /** 是否显示「后台弹出界面」入口（MIUI 专属权限）。 */
+    backgroundPopupSupported: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val colorScheme = MaterialTheme.colorScheme
@@ -284,16 +291,19 @@ fun SettingsScreen(
                     notifyQuestions = notifyQuestions,
                     notifyCompletion = notifyCompletion,
                     permissionGranted = notificationPermissionGranted,
-                    overlayEnabled = overlayEnabled,
-                    overlayPermissionGranted = overlayPermissionGranted,
+                    bubbleEnabled = bubbleEnabled,
+                    bubblesAllowed = bubblesAllowed,
                     onRequestPermission = onRequestNotificationPermission,
                     onOpenSystemSettings = onOpenNotificationSettings,
+                    onOpenNotificationManagement = onOpenNotificationManagement,
+                    onOpenBackgroundPopupSettings = onOpenBackgroundPopupSettings,
+                    backgroundPopupSupported = backgroundPopupSupported,
                     onNotificationsChange = onNotificationsChange,
                     onApprovalsChange = onApprovalsChange,
                     onQuestionsChange = onQuestionsChange,
                     onCompletionChange = onCompletionChange,
-                    onOverlayChange = onOverlayChange,
-                    onRequestOverlayPermission = onRequestOverlayPermission,
+                    onBubbleChange = onBubbleChange,
+                    onRequestBubbleSettings = onRequestBubbleSettings,
                 )
 
                 SettingsPage.ABOUT -> SettingsAboutPage(
@@ -908,8 +918,8 @@ private fun SettingsScreenPreview() {
             notifyQuestions = true,
             notifyCompletion = true,
             notificationPermissionGranted = true,
-            overlayEnabled = false,
-            overlayPermissionGranted = false,
+            bubbleEnabled = false,
+            bubblesAllowed = false,
             workStepDisplay = WorkStepDisplay.DEFAULT,
             workStepCollapseTiming = WorkStepCollapseTiming.DEFAULT,
             workStepFoldedReplies = WorkStepFoldedReplies.DEFAULT,
@@ -926,13 +936,16 @@ private fun SettingsScreenPreview() {
             onApprovalsChange = {},
             onQuestionsChange = {},
             onCompletionChange = {},
-            onOverlayChange = {},
-            onRequestOverlayPermission = {},
+            onBubbleChange = {},
+            onRequestBubbleSettings = {},
             onWorkStepDisplayChange = {},
             onWorkStepCollapseTimingChange = {},
             onWorkStepFoldedRepliesChange = {},
             onRequestNotificationPermission = {},
             onOpenNotificationSettings = {},
+            onOpenNotificationManagement = {},
+            onOpenBackgroundPopupSettings = {},
+            backgroundPopupSupported = false,
         )
     }
 }
