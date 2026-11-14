@@ -145,11 +145,23 @@ describe('in-app panel routes', { skip: reason }, () => {
     assert.ok(pairing.qr.size >= 21)
     assert.equal(typeof pairing.qr.data, 'string')
     assert.equal(Buffer.from(pairing.qr.data, 'base64').length, pairing.qr.size * pairing.qr.size)
+    // No TLS material in this harness: the LAN edge is the only one, and it must
+    // not pretend to carry a certificate it does not have.
+    assert.equal(pairing.mode, 'lan')
+    assert.equal(pairing.certificate, null)
 
     // The same code comes back from GET while it is still valid.
     const current = await request(host.base, '/plugins/dsh-gateway/pairing')
     assert.equal(current.status, 200)
     assert.equal(current.json.pairing?.code, pairing.code)
+    assert.equal(current.json.pairing?.mode, 'lan')
+
+    // Asking for the public edge on a machine without one degrades to LAN
+    // instead of returning an unusable/empty QR.
+    const fallback = await request(host.base, '/plugins/dsh-gateway/pairing?mode=public')
+    assert.equal(fallback.status, 200)
+    assert.equal(fallback.json.pairing?.mode, 'lan')
+    assert.equal(fallback.json.pairing?.certificate, null)
   })
 
   it('PATCH config flips lanRequirePairing and reports the restart for mdns', async () => {

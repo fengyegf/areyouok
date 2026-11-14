@@ -64,10 +64,17 @@ window.__ModuleLoader__.load({
       'pairing.placeholder': '二维码将显示在这里',
       'pairing.code': '配对码',
       'pairing.expires': '有效期至',
+      'pairing.mode': '二维码版本',
+      'pairing.modeLan': '局域网 HTTP',
+      'pairing.modePublic': '公网 HTTPS',
       'pairing.lan': '局域网（HTTP，免证书）',
       'pairing.public': '公网（HTTPS）',
-      'pairing.fingerprint': '证书指纹（仅公网）',
-      'pairing.note': '同一局域网优先走明文 HTTP，不需要证书也不需要设备令牌；公网才走 HTTPS，需要一次性配对码与证书指纹。二维码含一次性配对码，请勿截图外传。',
+      'pairing.fingerprint': '证书指纹',
+      'pairing.cert': '内置证书',
+      'pairing.certEmbedded': '已写入二维码（App 直接固定，无需装到系统）',
+      'pairing.certNone': '—',
+      'pairing.note': '局域网版二维码走明文 HTTP：不需要证书，也不需要设备令牌。二维码含一次性配对码，请勿截图外传。',
+      'pairing.notePublic': '公网版二维码内含公网地址和自签证书：手机扫码后直接在 App 内固定该证书，不需要把证书装进系统。二维码含一次性配对码，请勿截图外传。',
       'pairing.creating': '正在生成…',
       'devices.remote': '最近来源',
       'devices.seen': '最近活跃',
@@ -121,10 +128,17 @@ window.__ModuleLoader__.load({
       'pairing.placeholder': 'The QR code will appear here',
       'pairing.code': 'Code',
       'pairing.expires': 'Valid until',
+      'pairing.mode': 'QR version',
+      'pairing.modeLan': 'LAN HTTP',
+      'pairing.modePublic': 'Public HTTPS',
       'pairing.lan': 'LAN (plain HTTP, no certificate)',
       'pairing.public': 'Public (HTTPS)',
-      'pairing.fingerprint': 'Certificate fingerprint (public only)',
-      'pairing.note': 'On the same network the phone uses plain HTTP: no certificate and no device token. Only the public edge needs a one-shot code and the certificate fingerprint. The QR contains that code — do not share a screenshot.',
+      'pairing.fingerprint': 'Certificate fingerprint',
+      'pairing.cert': 'Embedded certificate',
+      'pairing.certEmbedded': 'Inside the QR (the app pins it; no system install)',
+      'pairing.certNone': '—',
+      'pairing.note': 'The LAN QR uses plain HTTP: no certificate and no device token. It contains a one-shot code — do not share a screenshot.',
+      'pairing.notePublic': 'The public QR carries the public URL and the self-signed certificate: after scanning, the app pins that certificate itself, so nothing has to be installed into the system store. It contains a one-shot code — do not share a screenshot.',
       'pairing.creating': 'Generating…',
       'devices.remote': 'Last source',
       'devices.seen': 'Last seen',
@@ -220,6 +234,15 @@ window.__ModuleLoader__.load({
       '.' + CLS + '-qr{flex:none;background:#fff;border-radius:var(--dsw-radius-lg,10px);padding:8px;',
       'box-sizing:border-box;width:180px;height:180px;display:flex;align-items:center;justify-content:center}',
       '.' + CLS + '-qr svg{display:block;width:100%;height:100%}',
+      /* A public code carries the whole certificate, which costs QR versions;
+       * the larger plate keeps the module size scannable at arm's length. */
+      '.' + CLS + '-qrLarge{width:290px;height:290px}',
+      '.' + CLS + '-mode{display:inline-flex;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md,8px);overflow:hidden}',
+      '.' + CLS + '-modeOption{appearance:none;font:inherit;font-size:12px;line-height:18px;padding:4px 10px;background:transparent;',
+      'color:var(--dsw-alias-label-secondary);border:0;cursor:pointer}',
+      '.' + CLS + '-modeOption[aria-pressed="true"]{background:var(--dsw-alias-bg-layer-3,var(--dsw-alias-bg-layer-2));',
+      'color:var(--dsw-alias-label-primary);font-weight:600}',
+      '.' + CLS + '-modeOption:disabled{opacity:.45;cursor:default}',
       /* The empty state. Same 180px footprint as a real code so generating one
        * does not shift the page, but painted on the panel's own surface with a
        * dashed edge instead of the QR's white plate — a white square is
@@ -330,7 +353,7 @@ window.__ModuleLoader__.load({
      * cursor) and wears a dashed edge on the panel's own surface, which reads as
      * an empty slot in both themes.
      */
-    function QrCode({ qr, label, placeholder }) {
+    function QrCode({ qr, label, placeholder, large }) {
       const matrix = React.useMemo(() => {
         if (qr === null || qr === undefined) return { size: 0, runs: [] };
         const size = Number(qr.size);
@@ -361,7 +384,7 @@ window.__ModuleLoader__.load({
 
       if (matrix.size === 0) {
         return h('div', {
-          className: CLS + '-qr ' + CLS + '-qrEmpty',
+          className: CLS + '-qr ' + CLS + '-qrEmpty' + (large === true ? ' ' + CLS + '-qrLarge' : ''),
           role: 'img',
           'aria-label': placeholder === undefined ? label : placeholder,
         },
@@ -383,7 +406,7 @@ window.__ModuleLoader__.load({
         h('rect', { x: 22, y: 22, width: 8, height: 8, rx: 1, fill: 'none', stroke: 'currentColor', strokeWidth: 1.6 })),
         h('span', { className: CLS + '-qrHint' }, placeholder === undefined ? label : placeholder));
       }
-      return h('div', { className: CLS + '-qr', role: 'img', 'aria-label': label },
+      return h('div', { className: CLS + '-qr' + (large === true ? ' ' + CLS + '-qrLarge' : ''), role: 'img', 'aria-label': label },
         h('svg', {
           viewBox: '0 0 ' + matrix.size + ' ' + matrix.size,
           shapeRendering: 'crispEdges',
@@ -500,6 +523,9 @@ window.__ModuleLoader__.load({
       const [error, setError] = React.useState('');
       const [busy, setBusy] = React.useState('');
       const [notice, setNotice] = React.useState('');
+      /* Which edge the QR describes. Only a display choice: switching edges
+       * rewrites the same one-shot code instead of minting a new one. */
+      const [pairMode, setPairMode] = React.useState('lan');
 
       /* The snapshot also lives in a ref: `refresh` must keep one identity for
        * the polling effect, so it cannot close over `state`, and it still has
@@ -561,14 +587,37 @@ window.__ModuleLoader__.load({
         if (state === null) return;
         setBusy('pairing');
         try {
-          const body = await call('/pairing', { method: 'POST', body: '{}' });
-          adopt(Object.assign({}, latest.current ?? state, { pairing: body.pairing }));
+          const body = await call('/pairing', { method: 'POST', body: JSON.stringify({ mode: pairMode }) });
+          const created = body.pairing ?? null;
+          if (created !== null) {
+            setPairMode(created.mode === 'public' ? 'public' : 'lan');
+            adopt(Object.assign({}, latest.current ?? state, { pairing: created }));
+          } else {
+            await refresh(false);
+          }
           announce(t('toast.paired'));
         } catch (cause) {
           announce(t('error.pairing', { message: cause.message }));
         } finally {
           setBusy('');
         }
+      };
+
+      /** Re-render the current code for the other edge (same code, new QR). */
+      const switchPairMode = (next) => {
+        if (next !== 'lan' && next !== 'public') return;
+        setPairMode(next);
+        if (pairing === null || pairing.mode === next) return;
+        setBusy('pairing');
+        call('/pairing?mode=' + next)
+          .then((body) => {
+            const view = body.pairing ?? null;
+            if (view !== null) {
+              adopt(Object.assign({}, latest.current ?? state, { pairing: view }));
+            }
+          })
+          .catch((cause) => announce(t('error.pairing', { message: cause.message })))
+          .finally(() => setBusy(''));
       };
 
       const revoke = async (device) => {
@@ -640,11 +689,15 @@ window.__ModuleLoader__.load({
         const pairingRows = pairing === null ? [] : [
           [t('pairing.code'), h('span', { className: CLS + '-mono' }, pairing.code)],
           [t('pairing.expires'), formatTime(pairing.expiresAt)],
+          [t('pairing.mode'), t(pairing.mode === 'public' ? 'pairing.modePublic' : 'pairing.modeLan')],
           [t('pairing.lan'), pairing.lanUrl === null ? '—' : pairing.lanUrl],
           [t('pairing.public'), pairing.publicUrl === null ? '—' : pairing.publicUrl],
           [t('pairing.fingerprint'), state.fingerprintPretty === '' || state.fingerprintPretty === undefined
             ? '—'
             : h('span', { className: CLS + '-mono' }, state.fingerprintPretty)],
+          [t('pairing.cert'), pairing.certificate === null || pairing.certificate === undefined
+            ? t('pairing.certNone')
+            : t('pairing.certEmbedded')],
         ];
 
         const statusPanel = h('div', { className: CLS + '-panel' },
@@ -681,15 +734,31 @@ window.__ModuleLoader__.load({
           pairingDetails,
           pairing === null ? null : h('span', { className: CLS + '-uri ' + CLS + '-mono' }, pairing.uri));
 
+        // A public edge needs an actual advertised address (config `publicUrl` or a
+        // global IPv6); otherwise the public version would silently fall back to LAN.
+        const publicEdge = Array.isArray(state.publicUrls) && state.publicUrls.length > 0;
+        const shownMode = pairing !== null && pairing.mode === 'public' ? 'public' : (pairing !== null ? 'lan' : pairMode);
+        const modeSwitch = h('div', { className: CLS + '-mode', role: 'group', 'aria-label': t('pairing.mode') },
+          [['lan', 'pairing.modeLan'], ['public', 'pairing.modePublic']].map(([mode, key]) => h('button', {
+            key: mode,
+            type: 'button',
+            className: CLS + '-modeOption',
+            'aria-pressed': shownMode === mode,
+            disabled: busy === 'pairing' || (mode === 'public' && !publicEdge),
+            onClick: () => switchPairMode(mode),
+          }, t(key))));
+
         const pairingPanel = h('div', { className: CLS + '-panel' },
+          modeSwitch,
           h('div', { className: CLS + '-pair' },
             h(QrCode, {
               qr: pairing === null ? null : pairing.qr,
               label: pairing === null ? t('pairing.empty') : t('pairing.code'),
               placeholder: t('pairing.placeholder'),
+              large: shownMode === 'public',
             }),
             pairingActions),
-          h('p', { className: CLS + '-hint' }, t('pairing.note')));
+          h('p', { className: CLS + '-hint' }, t(shownMode === 'public' ? 'pairing.notePublic' : 'pairing.note')));
 
         const devicesPanel = h('div', { className: CLS + '-panel' },
           devices.length === 0

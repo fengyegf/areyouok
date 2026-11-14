@@ -62,6 +62,22 @@ export function formatFingerprint(fingerprint) {
 }
 
 /**
+ * Base64url of the DER bytes — the compact form that rides inside the QR code.
+ *
+ * PEM armour and its line breaks cost roughly 150 extra URL-encoded characters,
+ * and the certificate is by far the longest field of a public pairing link. DER
+ * is the smallest reversible encoding, and the APK only needs the bytes back to
+ * pin the exact certificate the phone is about to trust.
+ * @param {string} pem
+ * @returns {string|null} base64url DER, or null when the PEM is unusable.
+ */
+export function certificateBase64Url(pem) {
+  const der = pemToDer(pem)
+  if (der === null || der.length === 0) return null
+  return Buffer.from(der).toString('base64url')
+}
+
+/**
  * Collect subjectAltName descriptors for this machine.
  * @param {string} [commonName]
  * @returns {{ dns: string[], ips: string[] }}
@@ -212,4 +228,11 @@ export async function ensureTlsMaterial(dir, logger, options = {}) {
   return { key, cert, fingerprint, created: true, certPath, keyPath }
 }
 
-export default { ensureTlsMaterial, fingerprintOfPem, formatFingerprint, localSubjectAltNames, pemToDer }
+export default {
+  ensureTlsMaterial,
+  fingerprintOfPem,
+  formatFingerprint,
+  certificateBase64Url,
+  localSubjectAltNames,
+  pemToDer,
+}

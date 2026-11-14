@@ -221,10 +221,14 @@ export function mountPanel({ ctx, api, logger }) {
 
   route(`${PANEL_PREFIX}/pairing`, {
     GET: async (gateway, req, res) => {
-      ok(res, { pairing: await gateway.panelPairing() })
+      // `mode` picks which edge the QR should describe; the code itself is
+      // untouched, so switching views never invalidates the other one.
+      const url = new URL(String(req.url ?? '/'), 'http://localhost')
+      ok(res, { pairing: await gateway.panelPairing(url.searchParams.get('mode') ?? '') })
     },
     POST: async (gateway, req, res) => {
-      ok(res, { pairing: await gateway.panelPairingCreate() })
+      const body = await readJsonBody(req, PANEL_BODY_LIMIT)
+      ok(res, { pairing: await gateway.panelPairingCreate(typeof body.mode === 'string' ? body.mode : '') })
     },
   })
 

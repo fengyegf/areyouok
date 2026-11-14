@@ -128,8 +128,10 @@ WS   /v1/stream                         长连接（hello/sub/ack/ping）
 鉴权：
 
 - `7788`：回环全放行；私网放行（`lanRequirePairing=true` 时需 `Authorization: Bearer <deviceToken>`）；公网来源 403。
-- `7789`：任何来源都需要设备令牌；HTTPS 自签证书，配对二维码携带证书 SHA-256 指纹供 APK 固定校验。
-- **局域网连接走明文 HTTP（7788），不需要证书**：mDNS 发现、配置页二维码、`dshgw://pair?lan=http://…` 都优先给局域网 HTTP 地址；APK 在同一网段时不会触碰 TLS，也不需要配对码（`lanRequirePairing=true` 时仍可在 LAN 上走 HTTP 配对换令牌）。公网 HTTPS 只在局域网不可达时使用。
+- `7789`：任何来源都需要设备令牌；HTTPS 自签证书。
+- **配置页二维码可在「局域网 HTTP / 公网 HTTPS」两个版本间切换**：
+  - 局域网版 `dshgw://pair?url=http://<ip>:7788&…` 不带证书；APK 在同一网段时不会触碰 TLS，也不需要配对码（`lanRequirePairing=true` 时仍可在 LAN 上走 HTTP 配对换令牌）。
+  - 公网版 `dshgw://pair?mode=pub&pub=https://…&cert=<base64url DER>&fp=<sha256>&…` 把公网地址**和自签证书本体**一起写进二维码；APK 扫码后直接在 App 内固定这张证书（`GatewayTls`/`GatewayPins` + 自定义 `TrustManager`/`HostnameVerifier`），**不需要把证书装进 Android 系统信任库**。二维码因此明显变密，面板会把公网版放大到 290px 显示。
 - 网关的两个监听**不再提供任何管理页面或管理接口**：`/admin` 及其 `/admin/api/*` 已删除，只剩 `/v1`。
 
 ## 配置页（内置在设置面板里）
@@ -143,7 +145,7 @@ WS   /v1/stream                         长连接（hello/sub/ack/ping）
 页面内容（一页纵向排列，不分标签）：
 
 - **运行状态**：DSH 连接、局域网 HTTP / 公网 HTTPS 端口、mDNS、已配对设备数、已运行时长
-- **扫码配对**：生成一次性 `dshgw://pair?…` 配对码，页内直接画出二维码（**优先局域网 HTTP 地址** + 公网 HTTPS 回退 + 一次性 code + 证书指纹 + 主机名，10 分钟有效）
+- **扫码配对**：生成一次性 `dshgw://pair?…` 配对码，页内直接画出二维码；顶部可在**局域网 HTTP / 公网 HTTPS**两个版本间切换（公网版额外内嵌自签证书，供 App 直接固定），10 分钟有效
 - **已配对设备**：名称、设备 ID、最近来源、最近活跃、撤销
 - **开关**：`lanRequirePairing`、`mdns`（内存生效；`mdns` 需重启）
 
@@ -169,8 +171,8 @@ WS   /v1/stream                         长连接（hello/sub/ack/ping）
 
 ```
 GET    /plugins/dsh-gateway/state           面板快照
-GET    /plugins/dsh-gateway/pairing         当前配对码（无则 null）
-POST   /plugins/dsh-gateway/pairing         生成新配对码
+GET    /plugins/dsh-gateway/pairing?mode=   当前配对码（无则 null；mode 选 lan/public 视图）
+POST   /plugins/dsh-gateway/pairing         生成新配对码（body `{mode}`）
 DELETE /plugins/dsh-gateway/devices?deviceId=  撤销设备
 PATCH  /plugins/dsh-gateway/config          切换 lanRequirePairing / mdns
 ```

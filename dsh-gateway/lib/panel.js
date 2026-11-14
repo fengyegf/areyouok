@@ -89,19 +89,45 @@ export function formatHost(address) {
 }
 
 /**
+ * Normalize a pairing-edge selector to `'lan'` or `'public'`.
+ *
+ * The panel sends `'lan' | 'public'`; older callers send nothing. Accept the
+ * shorthands a human might type in a query string too, and never throw: an
+ * unknown value means "this machine's default edge".
+ * @param {unknown} value
+ * @param {'lan'|'public'} [fallback]
+ * @returns {'lan'|'public'}
+ */
+export function normalizePairingMode(value, fallback = 'lan') {
+  if (typeof value !== 'string') return fallback
+  const mode = value.trim().toLowerCase()
+  if (mode === 'public' || mode === 'pub' || mode === 'https' || mode === 'wss') return 'public'
+  if (mode === 'lan' || mode === 'local' || mode === 'http') return 'lan'
+  return fallback
+}
+
+/**
  * Build the `dshgw://pair?…` deep link scanned by the APK.
  *
- * LAN candidates are plain `http://…` (no certificate, no token needed);
- * public candidates are `https://…` and need the pairing code + certificate
- * fingerprint. `url` stays as the primary/first choice for older clients.
+ * Two shapes exist, one per edge:
+ *
+ *   - LAN: plain `http://…` — no certificate and no token needed; `mode` is
+ *     omitted so an older APK keeps its LAN-first preference,
+ *   - public: `https://…` plus `mode=pub` and `cert=<base64url DER>`. The APK
+ *     pins that exact certificate out of the QR, which is what lets it trust a
+ *     self-signed gateway without installing anything into the system store.
+ *
+ * `url` stays the primary/first choice for older clients.
  */
-export function pairingUri({ url, lan, pub, code, fingerprint, name } = {}) {
+export function pairingUri({ url, lan, pub, code, fingerprint, name, mode, certificate } = {}) {
   const params = new URLSearchParams()
   if (typeof url === 'string' && url !== '') params.set('url', url)
   if (typeof lan === 'string' && lan !== '') params.set('lan', lan)
   if (typeof pub === 'string' && pub !== '') params.set('pub', pub)
   if (typeof code === 'string' && code !== '') params.set('code', code)
   if (typeof fingerprint === 'string' && fingerprint !== '') params.set('fp', fingerprint)
+  if (normalizePairingMode(mode) === 'public') params.set('mode', 'pub')
+  if (typeof certificate === 'string' && certificate !== '') params.set('cert', certificate)
   params.set('n', typeof name === 'string' && name !== '' ? name : 'dsh-gateway')
   return `dshgw://pair?${params.toString()}`
 }
@@ -117,26 +143,38 @@ export function pairingUri({ url, lan, pub, code, fingerprint, name } = {}) {
  * @param {string} text
  * @returns {{size:number, data:string}|null} row-major module values, base64 encoded.
  */
-function encodeQrMatrix(text) {
-  try {
-    const created = QRCode.create(text, { errorCorrectionLevel: 'M' })
-    const { size, data } = created.modules
-    return { size, data: Buffer.from(data).toString('base64') }
-  } catch {
-    return null
+function encodeQrMatrix(text, preferredLevel = 'M') {
+  /* A public link carries the whole certificate (~1.3 kB of base64url), which is
+   * far more than a LAN link. Level M can run out of versions there, so fall
+   * back to L: the code is scanned from a bright screen at close range, and a
+   * slightly denser, scannable code beats a blank panel. */
+  const levels = preferredLevel === 'M' ? ['M', 'L'] : [preferredLevel, 'L']
+  for (const level of levels) {
+    try {
+      const created = QRCode.create(text, { errorCorrectionLevel: level })
+      const { size, data } = created.modules
+      return { size, data: Buffer.from(data).toString('base64') }
+    } catch {
+      // Try the next error-correction level (or give up to the empty state).
+    }
   }
+  return null
 }
 
 /**
  * Build the presentation object for one pairing code, including its QR code.
  *
- * The QR prefers the LAN plain-HTTP URL: a phone on the same network then
- * connects without any TLS certificate, pairing code or device token.
- * Public HTTPS URLs remain in the payload as a fallback (`pub`).
- * @param {{pairing:object|null, fingerprint?:string, name?:string}} input
+ * The default edge is LAN plain HTTP: a phone on the same network then connects
+ * without any TLS certificate, pairing code or device token. Asking for
+ * `mode: 'public'` swaps the QR over to the HTTPS edge and embeds the
+ * certificate (`certificate`, base64url DER) so the APK can pin it directly.
+ *
+ * The requested edge only wins when it actually has a URL; a machine without a
+ * public address still produces a usable LAN code instead of an empty matrix.
+ * @param {{pairing:object|null, fingerprint?:string, name?:string, mode?:string, certificate?:string}} input
  * @returns {Promise<object|null>}
  */
-export async function buildPairingView({ pairing, fingerprint = '', name = '' } = {}) {
+export async function buildPairingView({ pairing, fingerprint = '', name = '', mode = '', certificate = '' } = {}) {
   if (pairing === null || typeof pairing !== 'object' || typeof pairing.code !== 'string') return null
   const urls = (Array.isArray(pairing.urls) ? pairing.urls : [])
     .filter((url) => typeof url === 'string' && url.trim() !== '')
@@ -145,8 +183,18 @@ export async function buildPairingView({ pairing, fingerprint = '', name = '' } 
   const publicUrls = urls.filter((url) => /^https:\/\//i.test(url))
   const lanUrl = typeof pairing.lanUrl === 'string' && pairing.lanUrl !== '' ? pairing.lanUrl : (lanUrls[0] ?? '')
   const publicUrl = typeof pairing.publicUrl === 'string' && pairing.publicUrl !== '' ? pairing.publicUrl : (publicUrls[0] ?? '')
-  const url = lanUrl !== '' ? lanUrl : (publicUrl !== '' ? publicUrl : (urls[0] ?? ''))
+  const requested = normalizePairingMode(
+    typeof mode === 'string' && mode !== '' ? mode : pairing.mode,
+    lanUrl !== '' ? 'lan' : 'public',
+  )
+  const selectedMode = requested === 'public' && publicUrl !== '' ? 'public' : 'lan'
+  const url = selectedMode === 'public'
+    ? publicUrl
+    : (lanUrl !== '' ? lanUrl : (publicUrl !== '' ? publicUrl : (urls[0] ?? '')))
   const fp = typeof pairing.fingerprint === 'string' && pairing.fingerprint !== '' ? pairing.fingerprint : fingerprint
+  const cert = selectedMode === 'public' && typeof certificate === 'string' && certificate !== ''
+    ? certificate
+    : ''
   const uri = url === ''
     ? null
     : pairingUri({
@@ -156,12 +204,15 @@ export async function buildPairingView({ pairing, fingerprint = '', name = '' } 
       code: pairing.code,
       fingerprint: fp,
       name,
+      mode: selectedMode,
+      certificate: cert,
     })
   return {
     code: pairing.code,
     createdAt: pairing.createdAt ?? null,
     expiresAt: pairing.expiresAt ?? null,
     ttlMs: pairing.ttlMs ?? null,
+    mode: selectedMode,
     urls,
     lanUrls,
     publicUrls,
@@ -169,8 +220,9 @@ export async function buildPairingView({ pairing, fingerprint = '', name = '' } 
     publicUrl: publicUrl === '' ? null : publicUrl,
     url,
     fingerprint: fp || null,
+    certificate: cert === '' ? null : cert,
     uri,
-    qr: uri === null ? null : encodeQrMatrix(uri),
+    qr: uri === null ? null : encodeQrMatrix(uri, cert === '' ? 'M' : 'L'),
   }
 }
 
@@ -190,13 +242,15 @@ export async function buildState({
   devices = [],
   pairing = null,
   config = {},
+  mode = '',
+  certificate = '',
   publicUrls = [],
   lanUrls = [],
   uptimeMs = 0,
   lastError = '',
   serverTime = Date.now(),
 } = {}) {
-  const pairingView = await buildPairingView({ pairing, fingerprint, name })
+  const pairingView = await buildPairingView({ pairing, fingerprint, name, mode, certificate })
   return {
     ok: true,
     name,
@@ -225,4 +279,4 @@ export async function buildState({
   }
 }
 
-export default { enumerateAddresses, formatHost, pairingUri, buildPairingView, buildState }
+export default { enumerateAddresses, formatHost, normalizePairingMode, pairingUri, buildPairingView, buildState }

@@ -33,7 +33,7 @@ const PNG = Buffer.from(
 )
 
 const ATTACHMENT = {
-  attachmentId: 'att-preview-1',
+  attachmentId: 'sha256:6b1d0f7b4a1c9e2d3f4a5b6c7d8e9f00112233445566778899aabbccddeeff00',
   mediaType: 'image/png',
   width: 1,
   height: 1,

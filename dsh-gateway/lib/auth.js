@@ -197,8 +197,8 @@ export class AuthService {
   /**
    * Create a one-shot pairing code.
    * @param {string[]} [urls] - gateway base URLs embedded in the QR code.
-   * @param {{fingerprint?:string|null, ttlMs?:number}} [options]
-   * @returns {{code:string, urls:string[], expiresAt:number, createdAt:number, fingerprint:string|null, ttlMs:number}}
+   * @param {{fingerprint?:string|null, mode?:string, ttlMs?:number}} [options]
+   * @returns {{code:string, urls:string[], expiresAt:number, createdAt:number, fingerprint:string|null, mode:string, ttlMs:number}}
    */
   createPairingCode(urls = [], options = {}) {
     const now = Date.now()
@@ -220,6 +220,9 @@ export class AuthService {
       fingerprint: typeof options.fingerprint === 'string' && options.fingerprint !== ''
         ? options.fingerprint
         : null,
+      /* Which edge this code was minted for. The panel can still render either
+       * view for it, but the default follows the reader's last choice. */
+      mode: options.mode === 'public' ? 'public' : 'lan',
     }
     this.pairingCodes.set(code, entry)
     // Keep the in-memory table bounded even if nobody sweeps.
@@ -229,6 +232,26 @@ export class AuthService {
       this.pairingCodes.delete(oldest.value)
     }
     return { ...entry, urls: [...entry.urls] }
+  }
+
+  /**
+   * Remember which edge the panel is currently showing.
+   *
+   * The panel re-reads its snapshot every few seconds; without this the view
+   * would snap back to the mode the code was minted with. Display state only:
+   * the code, its TTL and its one-shot semantics are untouched.
+   * @param {string} mode - `'lan'` | `'public'`
+   * @returns {boolean} whether any live code was updated.
+   */
+  setPairingMode(mode) {
+    this.#prunePairingCodes(Date.now())
+    const next = mode === 'public' ? 'public' : 'lan'
+    let updated = false
+    for (const entry of this.pairingCodes.values()) {
+      entry.mode = next
+      updated = true
+    }
+    return updated
   }
 
   /**

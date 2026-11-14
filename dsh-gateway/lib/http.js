@@ -40,16 +40,17 @@ import {
   buildState,
   enumerateAddresses,
   formatHost,
+  normalizePairingMode,
   pairingUri,
 } from './panel.js'
 import { filesOfContent, imagesOfContent } from './normalize.js'
-import { formatFingerprint } from './tls.js'
+import { certificateBase64Url, formatFingerprint } from './tls.js'
 
 /** DSH version this plugin was verified against. */
 export const DSH_VERSION = '0.2.2-rc.1'
 
 /** Gateway package version (kept in sync with package.json by hand). */
-export const GATEWAY_VERSION = '0.2.1'
+export const GATEWAY_VERSION = '0.2.2'
 
 /** `/v1` protocol version. */
 export const PROTOCOL_VERSION = 1
@@ -896,6 +897,17 @@ export class ApiServer {
     return typeof this.tls?.fingerprint === 'string' ? this.tls.fingerprint : ''
   }
 
+  /**
+   * Base64url DER of the public-edge certificate (empty when TLS is disabled).
+   *
+   * The public pairing QR embeds it so the APK can pin the exact certificate:
+   * a self-signed gateway is trustworthy to the phone without anything being
+   * installed into the system trust store.
+   */
+  #certificate() {
+    return certificateBase64Url(this.tls?.cert ?? '') ?? ''
+  }
+
   // -------------------------------------------------------------- /v1 routes
 
   hHealth({ res, verdict }) {
@@ -1437,6 +1449,7 @@ export class ApiServer {
       },
       devices: this.auth?.devices?.() ?? [],
       pairing: this.auth?.currentPairing?.() ?? null,
+      certificate: this.#certificate(),
       config,
       publicUrls,
       lanUrls,
@@ -1445,25 +1458,47 @@ export class ApiServer {
     })
   }
 
-  /** The current pairing code (panel only), rendered for the QR view. */
-  async panelPairing() {
+  /**
+   * The current pairing code (panel only), rendered for one edge.
+   *
+   * `mode` is a view selector, not stored state: the same one-shot code can be
+   * shown as a LAN QR or a public HTTPS QR, and switching between them must not
+   * invalidate the code the other view already displays.
+   * @param {string} [mode] - `'lan'` | `'public'` (defaults to the code's own mode).
+   */
+  async panelPairing(mode = '') {
     const pairing = this.auth?.currentPairing?.() ?? null
-    const view = pairing === null
-      ? null
-      : await buildPairingView({ pairing, fingerprint: this.#fingerprint(), name: this.effectiveConfig().name })
-    return view
+    if (pairing === null) return null
+    const selected = normalizePairingMode(mode, normalizePairingMode(pairing.mode, 'lan'))
+    // Only an explicit request changes the remembered edge; a bare GET (the
+    // poller re-reading the snapshot) keeps whatever the panel last showed.
+    if (typeof mode === 'string' && mode !== '') this.auth?.setPairingMode?.(selected)
+    return buildPairingView({
+      pairing,
+      fingerprint: this.#fingerprint(),
+      name: this.effectiveConfig().name,
+      mode: selected,
+      certificate: this.#certificate(),
+    })
   }
 
   /** Mint a fresh one-shot pairing code (panel only). */
-  async panelPairingCreate() {
+  async panelPairingCreate(mode = '') {
     if (this.auth === null || typeof this.auth?.createPairingCode !== 'function') {
       throw new HttpError(503, 'dsh_unavailable', 'pairing is unavailable')
     }
+    const selected = normalizePairingMode(mode, 'lan')
     const urls = this.#pairingUrls()
     const fingerprint = this.#fingerprint()
-    const pairing = this.auth.createPairingCode(urls, { fingerprint })
-    const view = await buildPairingView({ pairing, fingerprint, name: this.effectiveConfig().name })
-    this.logger.info?.(`pairing code created (ttl=${Math.round((pairing.expiresAt - Date.now()) / 1000)}s, urls=${urls.length})`)
+    const pairing = this.auth.createPairingCode(urls, { fingerprint, mode: selected })
+    const view = await buildPairingView({
+      pairing,
+      fingerprint,
+      name: this.effectiveConfig().name,
+      mode: selected,
+      certificate: this.#certificate(),
+    })
+    this.logger.info?.(`pairing code created (mode=${selected}, ttl=${Math.round((pairing.expiresAt - Date.now()) / 1000)}s, urls=${urls.length})`)
     return view
   }
 
