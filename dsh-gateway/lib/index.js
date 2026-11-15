@@ -31,6 +31,7 @@ import { DshLoopbackClient } from './dsh.js'
 import { AuthService } from './auth.js'
 import { ApiServer } from './http.js'
 import { StreamServer } from './ws.js'
+import { TranslationService } from './translate.js'
 import { MdnsAdvertiser } from './mdns.js'
 import { ensureTlsMaterial } from './tls.js'
 import { mountPanel } from './panel-routes.js'
@@ -66,6 +67,14 @@ export function createGateway(options) {
 
   const hub = new EventHub({ config, logger, dir })
   const auth = new AuthService({ hub, config, logger, dir })
+
+  /**
+   * 思考链翻译后端：Bing/Google 匿名端点 + dataDir 里的持久 LRU 缓存。
+   *
+   * 构造时就异步加载缓存，但启动路径不等待它：翻译缓存是本地小文件，
+   * 绝不应该挡住 7788/7789 的监听和 DSH 回环连接。
+   */
+  const translate = new TranslationService({ config, logger, dir })
 
   /**
    * 每轮结束的事实源：订阅宿主 `session/event · turn/end`，广播 `turn.completed`。
@@ -246,6 +255,7 @@ export function createGateway(options) {
         auth,
         tls,
         dir,
+        translate,
         onUpgrade: (req, socket, head) => ws?.handleUpgrade(req, socket, head),
       })
       ports = await api.start()
@@ -309,6 +319,11 @@ export function createGateway(options) {
       // ignore
     }
     try {
+      await translate.close()
+    } catch {
+      // ignore
+    }
+    try {
       await dsh?.stop()
     } catch {
       // ignore
@@ -323,6 +338,7 @@ export function createGateway(options) {
   return {
     hub,
     auth,
+    translate,
     config,
     dir,
     logger,

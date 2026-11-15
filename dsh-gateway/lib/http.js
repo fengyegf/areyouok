@@ -44,6 +44,12 @@ import {
   pairingUri,
 } from './panel.js'
 import { filesOfContent, imagesOfContent } from './normalize.js'
+import {
+  TRANSLATE_TARGETS,
+  TranslationError,
+  normalizeProvider,
+  normalizeTarget,
+} from './translate.js'
 import { certificateBase64Url, formatFingerprint } from './tls.js'
 
 /** DSH version this plugin was verified against. */
@@ -125,6 +131,8 @@ const ROUTES = [
   ['GET', /^\/v1\/interventions$/, 'interventions'],
   ['POST', /^\/v1\/interventions\/([^/]+)\/answer$/, 'interventionAnswer'],
   ['GET', /^\/v1\/events$/, 'events'],
+  ['GET', /^\/v1\/translate\/providers$/, 'translateProviders'],
+  ['POST', /^\/v1\/translate$/, 'translate'],
 ]
 
 /** Strip characters a display name should never carry into the panel. */
@@ -478,14 +486,17 @@ export class ApiServer {
    * @param {import('./auth.js').AuthService} deps.auth
    * @param {{key:string,cert:string,fingerprint:string}|null} [deps.tls]
    * @param {string} [deps.dir]
+   * @param {import('./translate.js').TranslationService} [deps.translate]
    * @param {(req:any,socket:any,head:Buffer)=>void} [deps.onUpgrade]
    */
-  constructor({ ctx, config, logger, hub, auth, tls, dir, onUpgrade }) {
+  constructor({ ctx, config, logger, hub, auth, tls, dir, translate, onUpgrade }) {
     this.ctx = ctx ?? null
     this.config = config ?? {}
     this.logger = logger ?? {}
     this.hub = hub
     this.auth = auth
+    /** Anonymous translation backend (may be null in minimal test wiring). */
+    this.translate = translate ?? null
     this.tls = tls ?? null
     this.dir = typeof dir === 'string' ? dir : ''
     this.onUpgrade = typeof onUpgrade === 'function' ? onUpgrade : null
@@ -775,6 +786,10 @@ export class ApiServer {
       return
     }
     if (error instanceof HttpError) {
+      this.#writeError(res, error.status, error.code, error.message)
+      return
+    }
+    if (error instanceof TranslationError) {
       this.#writeError(res, error.status, error.code, error.message)
       return
     }
@@ -1246,6 +1261,64 @@ export class ApiServer {
   async hPermissions({ res }) {
     const catalog = await this.#permissionCatalog()
     writeJson(res, 200, { ok: true, catalog })
+  }
+
+  /**
+   * GET /v1/translate/providers — anonymous translation discovery.
+   *
+   * Answered from config alone: no network, no DSH call, so the client can
+   * render its translation controls even while the DSH link is still coming up.
+   */
+  hTranslateProviders({ res }) {
+    const translate = this.#translate()
+    writeJson(res, 200, { ok: true, ...translate.providers() })
+  }
+
+  /**
+   * POST /v1/translate — translate one thinking-chain chunk.
+   *
+   * Input limits are enforced here (400 / 413) so a bad request never reaches
+   * the network; the service maps provider/timeout/concurrency failures to
+   * 502 / 504 / 503 / 429 and the shared error envelope writes them.
+   */
+  async hTranslate({ req, res }) {
+    const translate = this.#translate()
+    const body = await readJsonBody(req, BODY_LIMIT)
+    const text = body.text
+    if (typeof text !== 'string' || text.trim() === '') {
+      throw new HttpError(400, 'invalid_request', 'text is required')
+    }
+    const target = normalizeTarget(body.targetLanguage)
+    if (target === null) {
+      throw new HttpError(400, 'invalid_request', 'targetLanguage must be one of: ' + TRANSLATE_TARGETS.join(', '))
+    }
+    const maxTextChars = translate.maxTextChars
+    if (text.length > maxTextChars) {
+      throw new HttpError(413, 'text_too_long', 'text must be at most ' + maxTextChars + ' UTF-16 code units')
+    }
+    let provider
+    if (body.provider !== undefined) {
+      const normalized = normalizeProvider(body.provider)
+      if (normalized === null) {
+        throw new HttpError(400, 'invalid_request', 'provider must be bing or google')
+      }
+      provider = normalized
+    }
+    const result = await translate.translate({
+      text,
+      targetLanguage: target,
+      provider,
+      sourceLanguage: body.sourceLanguage,
+    })
+    writeJson(res, 200, { ok: true, ...result })
+  }
+
+  /** The translation service, or the mapped 503 when this wiring has none. */
+  #translate() {
+    if (this.translate === null || this.translate === undefined || typeof this.translate.translate !== 'function') {
+      throw new HttpError(503, 'translation_unavailable', 'translation is unavailable')
+    }
+    return this.translate
   }
 
   /**

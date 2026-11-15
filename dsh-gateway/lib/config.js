@@ -29,6 +29,12 @@ export const DEFAULTS = Object.freeze({
   logFile: '',
   deviceTokenTtlDays: 0,
   pairingCodeTtlMs: 600_000,
+  translateEnabled: true,
+  translateProvider: 'bing',
+  translateTimeoutMs: 10_000,
+  translateMaxTextChars: 4000,
+  translateMaxResponseBytes: 1_048_576,
+  translateCacheMaxEntries: 500,
 })
 
 /** Schemastery schema consumed by the DSH loader / settings UI. */
@@ -46,6 +52,12 @@ export const Config = z.object({
   idleTimeoutMs: z.natural().default(DEFAULTS.idleTimeoutMs).description('WS 空闲判死阈值'),
   name: z.string().default(DEFAULTS.name).description('网关显示名（默认主机名）'),
   logFile: z.string().default(DEFAULTS.logFile).description('日志文件路径，空表示 <dataDir>/gateway.log'),
+  translateEnabled: z.boolean().default(DEFAULTS.translateEnabled).description('是否启用思考链翻译（/v1/translate）'),
+  translateProvider: z.string().default(DEFAULTS.translateProvider).description('默认翻译提供方：bing 或 google'),
+  translateTimeoutMs: z.natural().default(DEFAULTS.translateTimeoutMs).description('单次翻译超时（毫秒）'),
+  translateMaxTextChars: z.natural().default(DEFAULTS.translateMaxTextChars).description('单次翻译文本上限（UTF-16 码元）'),
+  translateMaxResponseBytes: z.natural().default(DEFAULTS.translateMaxResponseBytes).description('翻译响应正文上限（字节）'),
+  translateCacheMaxEntries: z.natural().default(DEFAULTS.translateCacheMaxEntries).description('翻译缓存条目上限'),
 })
 
 /** Clamp one numeric config value into a sane range. */
@@ -78,6 +90,17 @@ export function resolveConfig(raw) {
   config.idleTimeoutMs = intOf(input.idleTimeoutMs, DEFAULTS.idleTimeoutMs, 5_000, 600_000)
   config.name = typeof input.name === 'string' && input.name.trim() !== '' ? input.name.trim() : hostname()
   config.logFile = typeof input.logFile === 'string' ? input.logFile.trim() : ''
+  config.translateEnabled = input.translateEnabled === undefined
+    ? DEFAULTS.translateEnabled
+    : Boolean(input.translateEnabled)
+  config.translateProvider = typeof input.translateProvider === 'string' &&
+    ['bing', 'google'].includes(input.translateProvider.trim().toLowerCase())
+    ? input.translateProvider.trim().toLowerCase()
+    : DEFAULTS.translateProvider
+  config.translateTimeoutMs = intOf(input.translateTimeoutMs, DEFAULTS.translateTimeoutMs, 100, 120_000)
+  config.translateMaxTextChars = intOf(input.translateMaxTextChars, DEFAULTS.translateMaxTextChars, 1, 100_000)
+  config.translateMaxResponseBytes = intOf(input.translateMaxResponseBytes, DEFAULTS.translateMaxResponseBytes, 1024, 16_777_216)
+  config.translateCacheMaxEntries = intOf(input.translateCacheMaxEntries, DEFAULTS.translateCacheMaxEntries, 0, 10_000)
   config.deviceTokenTtlDays = intOf(input.deviceTokenTtlDays, DEFAULTS.deviceTokenTtlDays, 0, 3650)
   config.pairingCodeTtlMs = intOf(input.pairingCodeTtlMs, DEFAULTS.pairingCodeTtlMs, 30_000, 3_600_000)
   if (config.httpPort !== 0 && config.httpPort === config.httpsPort) config.httpsPort = 0

@@ -94,6 +94,12 @@ pnpm install
 | `heartbeatMs` | 20000 | WS 心跳间隔 |
 | `idleTimeoutMs` | 45000 | WS 判死阈值 |
 | `name` | 主机名 | 网关显示名（mDNS/health 用） |
+| `translateEnabled` | true | 思考链翻译（`/v1/translate`）总开关 |
+| `translateProvider` | `bing` | 默认翻译提供方：`bing` / `google` |
+| `translateTimeoutMs` | 10000 | 单次翻译超时（毫秒，含请求与读响应） |
+| `translateMaxTextChars` | 4000 | 单次翻译文本上限（UTF-16 码元） |
+| `translateMaxResponseBytes` | 1048576 | 翻译响应正文上限（字节） |
+| `translateCacheMaxEntries` | 500 | 服务端翻译缓存条目上限（LRU 淘汰） |
 
 > `lanRequirePairing` 与 `mdns` 也可以在配置页里直接切换，但那只改内存里的运行时值（`mdns` 还需重启 DSH 才换广告器）；要长期生效仍请写进上面的 `config`。
 
@@ -122,6 +128,8 @@ GET  /v1/models                         模型目录
 GET  /v1/interventions?status=pending   待审批/提问
 POST /v1/interventions/{eventId}/answer 回答
 GET  /v1/events?sinceSeq=               补发兜底
+GET  /v1/translate/providers            翻译提供方/目标语言/长度上限（纯配置，不联网）
+POST /v1/translate                      翻译一段文本 {text,targetLanguage,sourceLanguage?,provider?}
 WS   /v1/stream                         长连接（hello/sub/ack/ping）
 ```
 
@@ -133,6 +141,102 @@ WS   /v1/stream                         长连接（hello/sub/ack/ping）
   - 局域网版 `dshgw://pair?url=http://<ip>:7788&…` 不带证书；APK 在同一网段时不会触碰 TLS，也不需要配对码（`lanRequirePairing=true` 时仍可在 LAN 上走 HTTP 配对换令牌）。
   - 公网版 `dshgw://pair?mode=pub&pub=https://…&cert=<base64url DER>&fp=<sha256>&…` 把公网地址**和自签证书本体**一起写进二维码；APK 扫码后直接在 App 内固定这张证书（`GatewayTls`/`GatewayPins` + 自定义 `TrustManager`/`HostnameVerifier`），**不需要把证书装进 Android 系统信任库**。二维码因此明显变密，面板会把公网版放大到 290px 显示。
 - 网关的两个监听**不再提供任何管理页面或管理接口**：`/admin` 及其 `/admin/api/*` 已删除，只剩 `/v1`。
+
+### 思考链翻译（`/v1/translate`）
+
+安卓端把模型的思考链（`reasoning` / `thinking`）按段提交到这里翻译。网关调用微软 Edge 翻译或 Google 翻译的**匿名端点**，无需 API Key；同一段文本（含提供方、语言、原文）第二次请求直接命中服务端缓存，不再出网。
+
+- 默认开启（`translateEnabled: true`），但客户端默认仍不展示译文；关掉开关后接口返回 `503 translation_unavailable`。
+- 只做单段、有长度上限的翻译；长思考链由客户端自己切段。
+- 原文不写日志、不落盘；缓存键是 `sha256(provider|recipe|source|target|text)`，缓存文件里只有译文。
+
+#### `GET /v1/translate/providers`
+
+```json
+{
+  "ok": true,
+  "providers": [
+    { "id": "bing", "label": "Bing", "free": true },
+    { "id": "google", "label": "Google", "free": true }
+  ],
+  "defaultProvider": "bing",
+  "defaultTargetLanguage": "zh-CN",
+  "maxTextChars": 4000,
+  "targets": ["zh-CN", "zh-TW", "en", "ja"]
+}
+```
+
+该接口不联网、不依赖 DSH 连接，完全由配置生成。
+
+#### `POST /v1/translate`
+
+请求（`Content-Type: application/json`，字段都在 body 里）：
+
+```json
+{
+  "text": "I should check the file first.",
+  "targetLanguage": "zh-CN",
+  "sourceLanguage": "auto",
+  "provider": "bing"
+}
+```
+
+- `text`：必填且非空；长度 ≤ `translateMaxTextChars`（UTF-16 码元，即 JS `string.length`）。
+- `targetLanguage`：必填，必须是 `targets` 之一（大小写不敏感）。
+- `sourceLanguage`：可选，缺省或 `auto` 表示自动识别；显式给值时按 BCP-47 透传。
+- `provider`：可选，缺省用 `translateProvider`。
+
+成功响应：
+
+```json
+{
+  "ok": true,
+  "text": "我应该先检查这个文件。",
+  "provider": "bing",
+  "targetLanguage": "zh-CN",
+  "sourceLanguage": "auto",
+  "cached": false,
+  "chars": 12
+}
+```
+
+- `cached`：本次是否命中服务端缓存（命中时未出网）。
+- `chars`：**译文**的 UTF-16 长度（不是原文长度）。
+
+语言映射：
+
+| 请求语言 | Bing | Google |
+|---|---|---|
+| `zh` / `zh-CN` / `zh-SG` / `zh-Hans` | `zh-Hans` | `zh-CN` |
+| `zh-TW` / `zh-HK` / `zh-MO` / `zh-Hant` | `zh-Hant` | `zh-TW` |
+| 其它标签 | 原样透传 | 原样透传 |
+
+错误沿用统一信封 `{"ok":false,"error":{"code","message"}}`：
+
+| 状态 | code | 场景 |
+|---|---|---|
+| 400 | `invalid_request` | `text` 缺失/空白、`targetLanguage` 不在列表、`provider` 或 `sourceLanguage` 非法 |
+| 413 | `text_too_long` | `text.length` 超过 `translateMaxTextChars` |
+| 429 | `rate_limited` | 并发已满（4 路在跑）且排队已满（8 个等待） |
+| 502 | `translation_failed` | 提供方非 2xx、响应无法解析、响应超过 `translateMaxResponseBytes`、网络失败 |
+| 503 | `translation_unavailable` | `translateEnabled=false`（或服务已关闭） |
+| 504 | `translation_timeout` | 超过 `translateTimeoutMs`（排队等待也算） |
+
+安全与限制：
+
+- `redirect: error`，绝不跟随重定向；`credentials: omit`，不带 Cookie/凭据。
+- 不重试、不自动换提供方：一次请求最多一次出网。
+- 单次响应正文上限 `translateMaxResponseBytes`（默认 1 MiB），超限按 `502` 处理。
+- 缓存：启动时从 `<dataDir>/translate-cache.json` 加载，LRU 淘汰，写入用临时文件 + rename 原子替换；`translateCacheMaxEntries` 控制条数。
+- 鉴权与其它 `/v1` 路由一致：公网口必须带设备 Bearer 令牌。
+- 匿名端点是浏览器接口，可能限流或改协议；失败只会返回上面的错误码，客户端应回退到显示原文。
+
+示例（body.json 里放上面的请求 JSON）：
+
+```bash
+curl -s http://127.0.0.1:7788/v1/translate/providers
+curl -s -X POST http://127.0.0.1:7788/v1/translate -H "content-type: application/json" --data-binary @body.json
+```
 
 ## 配置页（内置在设置面板里）
 
