@@ -62,6 +62,7 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -532,7 +533,12 @@ private fun AssistantBubble(message: ChatMessage) {
  * 点开看完整思考过程。与正文严格分开，避免「思考内容」混进汇报里。
  */
 @Composable
-private fun ThinkingRow(message: ChatMessage, level: WorkStepDisplay) {
+private fun ThinkingRow(
+    message: ChatMessage,
+    level: WorkStepDisplay,
+    /** 分组内由分组正文统一限高滚动，行自己不再套一层滚动。 */
+    capsBody: Boolean = true,
+) {
     val colorScheme = MaterialTheme.colorScheme
     var expanded by rememberSaveable(
         message.id,
@@ -556,6 +562,7 @@ private fun ThinkingRow(message: ChatMessage, level: WorkStepDisplay) {
         streamingText = stringResource(R.string.gateway_thinking_streaming),
         expanded = expanded,
         onToggle = { expanded = !expanded },
+        capExpandedHeight = capsBody,
     ) {
         SelectionContainer {
             MarkdownText(
@@ -619,10 +626,15 @@ private fun WorkGroupCard(group: TimelineEntry.WorkGroup, level: WorkStepDisplay
         }
 
         if (expanded) {
+            // 展开后正文限高：对齐 DSH 的 min(400px, 50vh)，超长时卡片内部滚动、标题保持可见。
+            val bodyMaxHeight = workStepBodyMaxHeight(LocalConfiguration.current.screenHeightDp)
+            val bodyScroll = rememberScrollState()
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 10.dp, end = 10.dp, bottom = 10.dp),
+                    .padding(start = 10.dp, end = 10.dp, bottom = 10.dp)
+                    .heightIn(max = bodyMaxHeight)
+                    .verticalScroll(bodyScroll),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 group.items.forEach { item ->
@@ -770,8 +782,8 @@ private fun workStepDoneLabelRes(activity: WorkActivity): Int = when (activity) 
 @Composable
 private fun WorkItem(message: ChatMessage, level: WorkStepDisplay, live: Boolean) {
     when (message.role) {
-        ChatRole.THINKING -> ThinkingRow(message, level)
-        ChatRole.TOOL -> ToolStepRow(message, level, live)
+        ChatRole.THINKING -> ThinkingRow(message, level, capsBody = false)
+        ChatRole.TOOL -> ToolStepRow(message, level, live, capsBody = false)
         // 中间说明：工作过程里的 assistant 文字，弱化显示。
         else -> {
             SelectionContainer {
@@ -796,7 +808,13 @@ private fun WorkItem(message: ChatMessage, level: WorkStepDisplay, live: Boolean
  * - 展开后显示参数与输出；是否收进分组由档位决定。
  */
 @Composable
-private fun ToolStepRow(message: ChatMessage, level: WorkStepDisplay, live: Boolean) {
+private fun ToolStepRow(
+    message: ChatMessage,
+    level: WorkStepDisplay,
+    live: Boolean,
+    /** 分组内由分组正文统一限高滚动，行自己不再套一层滚动。 */
+    capsBody: Boolean = true,
+) {
     val colorScheme = MaterialTheme.colorScheme
     val toolName = message.meta?.takeIf { it.isNotBlank() }
     val output = message.text.takeIf { it.isNotBlank() && it != message.meta }
@@ -847,6 +865,7 @@ private fun ToolStepRow(message: ChatMessage, level: WorkStepDisplay, live: Bool
         streamingText = stringResource(R.string.gateway_tool_running),
         expanded = expanded,
         onToggle = { expanded = !expanded },
+        capExpandedHeight = capsBody,
     ) {
         // 只有展开时才做 JSON 美化：折叠状态下大参数不占主线程。
         val arguments = remember(message.arguments) { formatArguments(message.arguments) }
@@ -913,8 +932,16 @@ private fun ToolStepRow(message: ChatMessage, level: WorkStepDisplay, live: Bool
 }
 
 /**
+ * 展开的工作步骤正文最大高度，对齐 DSH 的 `max-height: min(400px, 50vh)`。
+ *
+ * 超过后不再整段摊开，而是在卡片内部滚动（标题固定可见），避免一条超长思考/工具输出
+ * 把整个会话顶走。
+ */
+private fun workStepBodyMaxHeight(screenHeightDp: Int) = minOf(400.dp, screenHeightDp.dp * 0.5f)
+
+/**
  * 折叠行通用骨架：一行「箭头 + 标签 + 可选摘要」，点按展开内容。
- * 思考行和工具行共用；档位只影响 [hint] 是否为空。
+ * 思考行和工具行共用；档位只影响 [hint] 是否为空；展开内容默认限高滚动。
  */
 @Composable
 private fun StepRow(
@@ -926,9 +953,13 @@ private fun StepRow(
     onToggle: () -> Unit,
     streaming: Boolean = false,
     streamingText: String = "",
+    /** 展开内容是否限高并在卡片内滚动（对齐 DSH `min(400px, 50vh)`）。 */
+    capExpandedHeight: Boolean = true,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val colorScheme = MaterialTheme.colorScheme
+    val bodyMaxHeight = workStepBodyMaxHeight(LocalConfiguration.current.screenHeightDp)
+    val bodyScroll = rememberScrollState()
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -982,7 +1013,14 @@ private fun StepRow(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 10.dp, end = 10.dp, bottom = 9.dp),
+                    .padding(start = 10.dp, end = 10.dp, bottom = 9.dp)
+                    .then(
+                        if (capExpandedHeight) {
+                            Modifier.heightIn(max = bodyMaxHeight).verticalScroll(bodyScroll)
+                        } else {
+                            Modifier
+                        },
+                    ),
                 verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
                 content()
