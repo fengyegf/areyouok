@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  设置 → 通知子页新增文案（本 App 通知设置 / 三个系统通知类别入口）。
+  单独成文件，避免与 strings.xml 里同名前缀的历史键混在一起；新增键不要与 strings.xml 重名。
+-->
+<resources>
+    <!-- 通知权限行：点进本 App 的通知设置页（不是系统级「通知管理」）。 -->
+    <string name="settings_notifications_app_settings_title">本应用的通知设置</string>
+    <string name="settings_notifications_app_settings_desc">在系统里调整本应用的通知总开关、通知类别与悬浮通知</string>
+
+    <!-- 未授权时的「重新授权」入口。 -->
+    <string name="settings_notifications_permission_request_title">重新授权通知</string>
+    <string name="settings_notifications_permission_request_desc">弹出系统授权框；已被永久拒绝时请用上面的入口到系统里开启</string>
+
+    <!-- 系统通知类别入口：与系统「通知类别」里的一一对应，可分别设声音/悬浮通知/气泡。 -->
+    <string name="settings_notifications_approval_channel_title">审批与提问通知设置</string>
+    <string name="settings_notifications_approval_channel_desc">打开「审批与提问」类别，单独调整声音、悬浮通知与气泡</string>
+    <string name="settings_notifications_task_channel_title">任务完成通知设置</string>
+    <string name="settings_notifications_task_channel_desc">打开「任务完成」类别，单独调整声音与悬浮通知</string>
+    <string name="settings_notifications_conversation_channel_title">对话气泡通知设置</string>
+    <string name="settings_notifications_conversation_channel_desc">打开「对话气泡」类别，调整常驻气泡的提示方式</string>
+
+    <!-- 页面底部提示。 -->
+    <string name="settings_notifications_channels_hint">审批与提问、任务完成分属不同的系统通知类别，可以分别静音；类别建好后的声音与气泡由系统控制，App 内无法修改。</string>
+</resources>

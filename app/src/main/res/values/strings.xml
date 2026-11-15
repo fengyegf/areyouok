@@ -56,8 +56,6 @@
     <string name="settings_notifications_question_desc">DSH 向你提问时推送到通知栏</string>
     <string name="settings_notifications_completion_title">任务完成提醒</string>
     <string name="settings_notifications_completion_desc">对话跑完一轮后弹窗提醒，点通知回到对应对话</string>
-    <string name="settings_notifications_system_title">审批、提问与任务完成通知设置</string>
-    <string name="settings_notifications_system_desc">在系统设置中开启悬浮通知和声音</string>
     <string name="settings_background_popup_title">后台弹出界面</string>
     <string name="settings_background_popup_desc">允许气泡在 App 位于后台时打开界面；MIUI 上未开启时点气泡会白屏</string>
     <string name="settings_about_title">基础信息</string>

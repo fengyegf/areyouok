@@ -51,8 +51,10 @@ import kotlinx.serialization.json.JsonPrimitive
  * - 审批通知两个 action「允许一次 / 拒绝」，`PendingIntent` 直接回到服务里
  *   `POST /v1/interventions/{eventId}/answer`，不必打开界面；
  * - 提问 / 任务完成通知带「回复」输入框（`RemoteInput`），可以直接在通知栏里回答或继续对话；
- * - 上述通知都附带 `BubbleMetadata`：用户允许气泡时以系统通知气泡显示，**不需要悬浮窗权限**；
- *   没允许时就是普通通知，功能不变；
+ * - 审批 / 提问通知与「当前对话」常驻气泡附带 `BubbleMetadata`：用户允许气泡时以系统通知气泡
+ *   显示，**不需要悬浮窗权限**；没允许时就是普通通知，功能不变；
+ * - 任务完成通知是普通通知（仍走 TASKS 渠道）：不发布会话快捷方式、不冒气泡，避免会话标题
+ *   长期留在系统「通知类别 / 对话」区；会话快捷方式在服务启动时按活跃会话清扫（最多 8 条）；
  * - 通知点击后都带上 `sessionId`，由 MainActivity 切到对应对话；
  * - 每轮对话结束（网关的 `turn.completed`）弹「任务完成」，用户正看着该会话时不打扰；
  * - Android 13+ 未授予 POST_NOTIFICATIONS 时降级：前台服务照常运行，但不再发通知。
@@ -83,6 +85,9 @@ class GatewayService : Service() {
         super.onCreate()
         runtime = GatewayRuntime.get(this)
         GatewayChannels.ensure(this)
+        // 启动时清掉不再活跃的会话快捷方式：long-lived 快捷方式会永久留在系统「通知类别 / 对话」
+        // 里，调试会话的标题（例如「创建 approval-bubble-test.txt 文件」）尤其刺眼。
+        pruneConversationShortcuts()
         startForegroundSafely(runtime.repository.connection.value)
         scope.launch {
             runtime.repository.connection.collect { state ->
@@ -236,6 +241,9 @@ class GatewayService : Service() {
      * 这是 Android 11+ 的硬要求：targetSdk 30+ 的通知必须引用共享快捷方式且带 Person，
      * 系统才承认它是对话并显示成气泡；否则（哪怕挂了 BubbleMetadata）只显示普通通知。
      * 气泡通知同时 `setAutoCancel(false)`——取消通知会连气泡一起移除。
+     *
+     * 只有「当前对话」常驻气泡与审批 / 提问通知走这里。任务完成通知是普通通知，不发布会话
+     * 快捷方式——long-lived 快捷方式会永久留在系统「通知类别 / 对话」区，会话标题越攒越多。
      */
     private fun applyConversation(
         builder: NotificationCompat.Builder,
@@ -345,9 +353,8 @@ class GatewayService : Service() {
      * 气泡通知实际可用的渠道：优先 [preferred]，该渠道不允许气泡时退回审批渠道。
      *
      * 系统气泡权限是**按渠道**给的（渠道设置里的「允许气泡」/ 应用级气泡开关都会收窄到
-     * 具体渠道）。「任务完成」是独立渠道，用户或 ROM 只给「审批与提问」开了气泡时，
-     * 完成提醒就会永远只出普通通知——看起来像「审批能冒气泡、完成后不冒」。
-     * 这里退回审批渠道，保证「气泡提醒开着 = 审批 / 提问 / 完成都按气泡格式发」。
+     * 具体渠道）。「对话气泡」是独立渠道，用户或 ROM 只给「审批与提问」开了气泡时，
+     * 常驻气泡会退化成普通通知；这里退回审批渠道，保证「气泡提醒开着 = 常驻气泡按对话格式发」。
      */
     private fun bubbleChannel(preferred: String): String {
         val manager = getSystemService(NotificationManager::class.java) ?: return preferred
@@ -503,6 +510,24 @@ class GatewayService : Service() {
                 pending = repository.pendingInterventions.value,
             ),
         )
+    }
+
+    /**
+     * 清扫不再活跃的会话快捷方式（服务启动时调用）。
+     *
+     * 会话快捷方式是 long-lived 的，系统会把它永久记进「通知类别 / 对话」区：测试会话、
+     * 已删会话的标题会长期残留。这里按当前活跃会话重算一次保留名单（当前对话 → 有待处理
+     * 审批/提问的会话 → 会话列表顺序），最多保留 [NotificationConversations.MAX_LONG_LIVED_SHORTCUTS]
+     * 条，其余全部删除。
+     */
+    private fun pruneConversationShortcuts() {
+        val repository = runtime.repository
+        val keep = NotificationConversations.keepSessionIds(
+            selectedSessionId = repository.selectedSessionId.value,
+            pendingSessionIds = repository.pendingInterventions.value.map { it.sessionId },
+            sessionIds = repository.sessions.value.map { it.id },
+        )
+        NotificationConversations.prune(this, keep)
     }
 
     /** 系统是否真的允许本应用显示气泡：渠道「允许气泡」或应用级气泡授权任一成立。 */
@@ -706,23 +731,24 @@ class GatewayService : Service() {
         if (!shouldNotify) return
         val notificationId = taskNotificationId(completion.sessionId)
         postedTaskIds[completion.sessionId] = notificationId
-        // 完成提醒同样不再额外冒气泡：当前对话的气泡本身就会更新成「已跑完」的状态。
-        postNotification(notificationId, false) { bubble ->
-            buildTaskNotification(completion, notificationId, bubble)
-        }
+        // 完成提醒是普通通知（[GatewayChannels.TASKS]）：不再发布会话快捷方式、也不挂
+        // BubbleMetadata，只留「当前对话」那一条常驻气泡作为气泡入口。
+        postNotification(notificationId, false) { buildTaskNotification(completion, notificationId) }
     }
 
+    /**
+     * 「任务完成」普通通知：固定走 [GatewayChannels.TASKS] 渠道，不发布会话快捷方式、不挂
+     * BubbleMetadata。气泡入口只保留「当前对话」那一条常驻通知，避免每个跑完的会话都在
+     * 系统「通知类别 / 对话」里留下一条 long-lived 快捷方式。
+     */
     private fun buildTaskNotification(
         completion: SessionCompletion,
         notificationId: Int,
-        withBubble: Boolean,
     ): Notification {
         val name = completion.title?.takeIf { it.isNotBlank() }
             ?: completion.sessionId.take(8)
         val text = "已跑完一轮，点击回到该对话查看结果"
-        // 完成提醒默认走独立渠道；要冒气泡时优先选「允许气泡」的渠道（见 [bubbleChannel]）。
-        val channelId = if (withBubble) bubbleChannel(GatewayChannels.TASKS) else GatewayChannels.TASKS
-        return NotificationCompat.Builder(this, channelId)
+        return NotificationCompat.Builder(this, GatewayChannels.TASKS)
             .setSmallIcon(R.drawable.ic_stat_gateway)
             .setContentTitle("任务完成 · $name")
             .setContentText(text)
@@ -733,33 +759,20 @@ class GatewayService : Service() {
                     requestCode = openAppRequestCode(notificationId),
                 ),
             )
-            // 与审批通知对齐：通知栏里能看出这条提醒来自哪个对话（气泡会话标题也用它兜底）。
+            // 通知栏里能看出这条提醒来自哪个对话。
             .setSubText(sessionLabel(completion.sessionId))
             .setAutoCancel(true)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .also { builder ->
-                // 系统通知气泡 + 通知栏里的「继续对话」输入框。
-                bubbleMetadata(completion.sessionId, notificationId, withBubble)?.let(builder::setBubbleMetadata)
-                applyConversation(
-                    builder = builder,
+            // 通知栏里的「继续对话」输入框；普通通知同样支持 RemoteInput。
+            .addAction(
+                replyAction(
+                    notificationId = notificationId,
+                    label = "回复",
                     sessionId = completion.sessionId,
-                    // 会话标题偶发拿不到（刚连上的会话还没进列表）：用 subText 同源的标题兜底，
-                    // 避免气泡的会话标题为空。
-                    title = completion.title?.takeIf { it.isNotBlank() }
-                        ?: sessionLabel(completion.sessionId),
-                    body = text,
-                    withBubble = withBubble,
-                )
-                builder.addAction(
-                    replyAction(
-                        notificationId = notificationId,
-                        label = "回复",
-                        sessionId = completion.sessionId,
-                    ),
-                )
-            }
+                ),
+            )
             .build()
     }
 
@@ -944,6 +957,9 @@ object GatewayChannels {
         "gateway_tasks",
     )
 
+    /** 本版本创建并维护的全部渠道 id（不含只用于兼容清理的 [LEGACY]）。 */
+    val ALL: List<String> = listOf(CONNECTION, INTERVENTIONS, TASKS, CONVERSATION)
+
     fun ensure(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         val connection = NotificationChannel(
@@ -1002,6 +1018,14 @@ object GatewayChannels {
             enableVibration(false)
             setAllowBubbles(true)
         }
+        // 历史 / 调试版本可能留下别的渠道 id：它们会一直挂在系统「通知类别」里（审查时能看到
+        // 调试残留），只能由 App 自己删。枚举现有渠道，凡本版本不认识的（不在 [ALL] 且不是
+        // [LEGACY]）一并删掉。
+        val known = ALL.toSet() + LEGACY
+        manager.notificationChannels
+            .map { it.id }
+            .filterNot { it in known }
+            .forEach { manager.deleteNotificationChannel(it) }
         // 渠道的重要性和声音一旦被用户或系统降级，App 无法在原渠道上恢复。
         // 删除旧 id 的渠道，让新版本按新配置重新建立。
         LEGACY.forEach { id -> manager.deleteNotificationChannel(id) }

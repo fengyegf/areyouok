@@ -133,6 +133,11 @@ import com.catmoecircle.areyouok.ui.gateway.rememberQrImageScannerLauncher
 import com.catmoecircle.areyouok.ui.gateway.rememberQrScannerLauncher
 import com.catmoecircle.areyouok.ui.settings.SettingsScreen
 import com.catmoecircle.areyouok.ui.settings.WorkStepCollapseTiming
+import com.catmoecircle.areyouok.ui.settings.openAppNotificationSettings
+import com.catmoecircle.areyouok.ui.settings.openApprovalChannelSettings
+import com.catmoecircle.areyouok.ui.settings.openBackgroundPopupSettings
+import com.catmoecircle.areyouok.ui.settings.openConversationChannelSettings
+import com.catmoecircle.areyouok.ui.settings.openTaskChannelSettings
 import com.catmoecircle.areyouok.ui.settings.WorkStepDisplay
 import com.catmoecircle.areyouok.ui.settings.WorkStepFoldedReplies
 import com.catmoecircle.areyouok.ui.theme.AreYouOKTheme
@@ -306,7 +311,7 @@ fun ChatScreen(modifier: Modifier = Modifier) {
             ).show()
             // 第一次拒绝只提示；再次点击仍被拒说明系统不再弹授权框，兜底打开系统通知设置。
             if (permissionDeniedOnce) {
-                openNotificationSettings(context)
+                openAppNotificationSettings(context)
             }
             permissionDeniedOnce = true
         }
@@ -716,13 +721,15 @@ fun ChatScreen(modifier: Modifier = Modifier) {
                 },
                 onRequestNotificationPermission = {
                     if (notificationPermissionGranted) {
-                        openNotificationSettings(context)
+                        openAppNotificationSettings(context)
                     } else {
                         notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                     }
                 },
-                onOpenNotificationSettings = { openNotificationSettings(context) },
-                onOpenNotificationManagement = { openNotificationManagement(context) },
+                onOpenNotificationSettings = { openAppNotificationSettings(context) },
+                onOpenApprovalChannelSettings = { openApprovalChannelSettings(context) },
+                onOpenTaskChannelSettings = { openTaskChannelSettings(context) },
+                onOpenConversationChannelSettings = { openConversationChannelSettings(context) },
                 onOpenBackgroundPopupSettings = { openBackgroundPopupSettings(context) },
                 backgroundPopupSupported = isMiuiDevice(),
             )
@@ -1715,42 +1722,6 @@ private fun openMiuiBubbleSettings(context: Context): Boolean = runCatching {
     )
 }.isSuccess
 
-/** 打开系统的「通知管理」页（通知总开关 / 应用列表），而不是单个应用的通知渠道页。 */
-private fun openNotificationManagement(context: Context) {
-    // 系统「通知管理」页（应用列表 / 总开关）；没有对应常量，用官方 action 字面量。
-    val intent = Intent("android.settings.NOTIFICATION_SETTINGS")
-        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    runCatching { context.startActivity(intent) }.onFailure { openNotificationSettings(context) }
-}
-
-/**
- * 打开 MIUI 的「后台弹出界面」权限页（应用权限编辑器，开关在「其他权限」里）。
- *
- * 没有这个权限时，系统会在拉起气泡 Activity 那一步直接拒绝（Permission Denied /
- * result 102），气泡展开就是一片白板；打开后点气泡才能进到对话界面。
- */
-private fun openBackgroundPopupSettings(context: Context) {
-    val intent = Intent("miui.intent.action.APP_PERM_EDITOR").apply {
-        setClassName(
-            "com.miui.securitycenter",
-            "com.miui.permcenter.permissions.PermissionsEditorActivity",
-        )
-        putExtra("extra_pkgname", context.packageName)
-        putExtra("extra_pkg_name", context.packageName)
-        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    }
-    runCatching { context.startActivity(intent) }.onFailure {
-        runCatching {
-            context.startActivity(
-                Intent(
-                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    Uri.fromParts("package", context.packageName, null),
-                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            )
-        }
-    }
-}
-
 /** Android 13+ 需要 POST_NOTIFICATIONS 权限；更早版本默认允许。 */
 private fun isNotificationPermissionGranted(context: Context): Boolean {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true
@@ -1758,32 +1729,6 @@ private fun isNotificationPermissionGranted(context: Context): Boolean {
         context,
         Manifest.permission.POST_NOTIFICATIONS,
     ) == PackageManager.PERMISSION_GRANTED
-}
-
-/** 直接打开“审批与提问”渠道，方便用户开启系统控制的悬浮通知与声音。 */
-private fun openNotificationSettings(context: Context) {
-    val channelIntent = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
-        .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-        .putExtra(Settings.EXTRA_CHANNEL_ID, GatewayChannels.INTERVENTIONS)
-        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    runCatching { context.startActivity(channelIntent) }.onFailure {
-        runCatching {
-            context.startActivity(
-                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            )
-        }.onFailure {
-            runCatching {
-                context.startActivity(
-                    Intent(
-                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                        Uri.fromParts("package", context.packageName, null),
-                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                )
-            }
-        }
-    }
 }
 
 /** 设备列表：把当前连接（可能来自 mDNS / 深链）补进最近列表，避免当前设备不显示。 */

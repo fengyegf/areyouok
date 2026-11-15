@@ -166,8 +166,10 @@ fun SettingsScreen(
     onWorkStepFoldedRepliesChange: (WorkStepFoldedReplies) -> Unit,
     onRequestNotificationPermission: () -> Unit,
     onOpenNotificationSettings: () -> Unit,
-    /** 打开系统的「通知管理」页（不是应用通知渠道页）。 */
-    onOpenNotificationManagement: () -> Unit,
+    /** 打开某个系统通知类别（审批与提问 / 任务完成 / 对话气泡）。 */
+    onOpenApprovalChannelSettings: () -> Unit = {},
+    onOpenTaskChannelSettings: () -> Unit = {},
+    onOpenConversationChannelSettings: () -> Unit = {},
     /** 打开 MIUI 的「后台弹出界面」权限页；非 MIUI 机型不显示该入口。 */
     onOpenBackgroundPopupSettings: () -> Unit,
     /** 是否显示「后台弹出界面」入口（MIUI 专属权限）。 */
@@ -293,16 +295,18 @@ fun SettingsScreen(
                     permissionGranted = notificationPermissionGranted,
                     bubbleEnabled = bubbleEnabled,
                     bubblesAllowed = bubblesAllowed,
-                    onRequestPermission = onRequestNotificationPermission,
-                    onOpenSystemSettings = onOpenNotificationSettings,
-                    onOpenNotificationManagement = onOpenNotificationManagement,
-                    onOpenBackgroundPopupSettings = onOpenBackgroundPopupSettings,
                     backgroundPopupSupported = backgroundPopupSupported,
                     onNotificationsChange = onNotificationsChange,
                     onApprovalsChange = onApprovalsChange,
                     onQuestionsChange = onQuestionsChange,
                     onCompletionChange = onCompletionChange,
                     onBubbleChange = onBubbleChange,
+                    onOpenAppNotificationSettings = onOpenNotificationSettings,
+                    onOpenApprovalChannelSettings = onOpenApprovalChannelSettings,
+                    onOpenTaskChannelSettings = onOpenTaskChannelSettings,
+                    onOpenConversationChannelSettings = onOpenConversationChannelSettings,
+                    onOpenBackgroundPopupSettings = onOpenBackgroundPopupSettings,
+                    onRequestPermission = onRequestNotificationPermission,
                     onRequestBubbleSettings = onRequestBubbleSettings,
                 )
 
@@ -943,7 +947,9 @@ private fun SettingsScreenPreview() {
             onWorkStepFoldedRepliesChange = {},
             onRequestNotificationPermission = {},
             onOpenNotificationSettings = {},
-            onOpenNotificationManagement = {},
+            onOpenApprovalChannelSettings = {},
+            onOpenTaskChannelSettings = {},
+            onOpenConversationChannelSettings = {},
             onOpenBackgroundPopupSettings = {},
             backgroundPopupSupported = false,
         )
