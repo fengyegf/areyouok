@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 思考链翻译相关文案。单独成文件，避免和 strings.xml 上的其他任务冲突。 -->
+<resources>
+
+    <!-- 设置页：思考链翻译 -->
+    <string name="settings_translation_title">思考链翻译</string>
+    <string name="settings_translation_enable_title">翻译思考链</string>
+    <string name="settings_translation_enable_desc">展开思考链时把推理过程翻译成目标语言；折叠摘要和正文不翻译。</string>
+    <string name="settings_translation_provider_section">翻译服务</string>
+    <string name="settings_translation_provider_bing">Bing</string>
+    <string name="settings_translation_provider_bing_desc">免费，无需 API Key</string>
+    <string name="settings_translation_provider_google">Google</string>
+    <string name="settings_translation_provider_google_desc">免费，无需 API Key</string>
+    <string name="settings_translation_target_section">目标语言</string>
+    <string name="settings_translation_target_follow">跟随应用（中文）</string>
+    <string name="settings_translation_target_zh_cn">简体中文</string>
+    <string name="settings_translation_target_zh_tw">繁體中文</string>
+    <string name="settings_translation_target_en">English</string>
+    <string name="settings_translation_target_ja">日本語</string>
+    <string name="settings_translation_privacy_hint">翻译会把展开的思考原文发送给第三方翻译服务；原文始终保留，可随时切回。</string>
+
+    <!-- 聊天时间线：思考行展开后的「查看原文 / 查看译文」入口 -->
+    <string name="thinking_translation_show_original">查看原文</string>
+    <string name="thinking_translation_show_translated">查看译文</string>
+    <string name="thinking_translation_loading">翻译中…</string>
+    <string name="thinking_translation_failed">翻译失败</string>
+    <string name="thinking_translation_retry">重试</string>
+    <string name="thinking_translation_wait_finish">思考结束后可翻译</string>
+
+</resources>

@@ -105,6 +105,7 @@ internal enum class SettingsPage(@StringRes val titleRes: Int) {
     CONNECTION(R.string.settings_page_connection),
     GATEWAY(R.string.settings_page_gateway),
     WORK_STEPS(R.string.work_step_display_title),
+    TRANSLATION(R.string.settings_translation_title),
     NOTIFICATIONS(R.string.settings_page_notifications),
     ABOUT(R.string.settings_page_about),
 }
@@ -117,6 +118,7 @@ internal enum class SettingsPage(@StringRes val titleRes: Int) {
  * - 连接页：已连接过的设备 + 连接开关，末尾「添加连接」直接唤起扫码；
  * - 网关页：自动发现同一局域网的 DSH 网关（点一下直连）+ 地址 / 配对码手动连接；
  * - 工作步骤显示：聊天里工具调用细节的 4 个档位（简洁 / 标准 / 详细 / 完全展开）；
+ * - 思考链翻译：总开关、翻译服务（Bing / Google）、目标语言（空值跟随应用）；
  * - 通知页：气泡提醒（置顶，开启后展开「激活气泡」）、通知权限、通知总开关、审批 / 提问 / 完成提醒；
  * - 关于页：应用名、设备名、版本号。
  *
@@ -174,6 +176,15 @@ fun SettingsScreen(
     onOpenBackgroundPopupSettings: () -> Unit,
     /** 是否显示「后台弹出界面」入口（MIUI 专属权限）。 */
     backgroundPopupSupported: Boolean,
+    /** 思考链翻译总开关（设置页展示；默认关闭）。 */
+    translationEnabled: Boolean = false,
+    /** 翻译服务 id（`bing` / `google`）。 */
+    translationProvider: String = GatewaySettings.DEFAULT_TRANSLATION_PROVIDER,
+    /** 目标语言；空串表示跟随应用（中文）。 */
+    translationTarget: String = "",
+    onTranslationEnabledChange: (Boolean) -> Unit = {},
+    onTranslationProviderChange: (String) -> Unit = {},
+    onTranslationTargetChange: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val colorScheme = MaterialTheme.colorScheme
@@ -252,6 +263,7 @@ fun SettingsScreen(
                     workStepDisplay = workStepDisplay,
                     workStepCollapseTiming = workStepCollapseTiming,
                     workStepFoldedReplies = workStepFoldedReplies,
+                    translationEnabled = translationEnabled,
                     versionName = versionName,
                     onOpenPage = { page = it },
                     onWorkStepCollapseTimingChange = onWorkStepCollapseTimingChange,
@@ -285,6 +297,15 @@ fun SettingsScreen(
                 SettingsPage.WORK_STEPS -> SettingsWorkStepDisplayPage(
                     selected = workStepDisplay,
                     onSelect = onWorkStepDisplayChange,
+                )
+
+                SettingsPage.TRANSLATION -> SettingsTranslationPage(
+                    enabled = translationEnabled,
+                    provider = translationProvider,
+                    target = translationTarget,
+                    onEnabledChange = onTranslationEnabledChange,
+                    onProviderChange = onTranslationProviderChange,
+                    onTargetChange = onTranslationTargetChange,
                 )
 
                 SettingsPage.NOTIFICATIONS -> SettingsNotificationPage(
@@ -804,6 +825,7 @@ private fun SettingsRootPage(
     workStepDisplay: WorkStepDisplay,
     workStepCollapseTiming: WorkStepCollapseTiming,
     workStepFoldedReplies: WorkStepFoldedReplies,
+    translationEnabled: Boolean,
     versionName: String,
     onOpenPage: (SettingsPage) -> Unit,
     onWorkStepCollapseTimingChange: (WorkStepCollapseTiming) -> Unit,
@@ -886,6 +908,17 @@ private fun SettingsRootPage(
                 selected = workStepFoldedReplies,
                 optionLabel = { stringResource(it.labelRes) },
                 onSelect = onWorkStepFoldedRepliesChange,
+            )
+            SettingsNavRow(
+                icon = MiuixIcons.Regular.Playlist,
+                title = stringResource(R.string.settings_translation_title),
+                description = stringResource(R.string.settings_translation_enable_desc),
+                value = if (translationEnabled) {
+                    stringResource(R.string.settings_notifications_on)
+                } else {
+                    stringResource(R.string.settings_notifications_off)
+                },
+                onClick = { onOpenPage(SettingsPage.TRANSLATION) },
             )
         }
 

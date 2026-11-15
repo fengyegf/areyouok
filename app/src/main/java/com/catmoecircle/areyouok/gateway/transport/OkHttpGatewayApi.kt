@@ -21,6 +21,9 @@ import com.catmoecircle.areyouok.gateway.protocol.PermissionResult
 import com.catmoecircle.areyouok.gateway.protocol.SelectModelRequest
 import com.catmoecircle.areyouok.gateway.protocol.SelectPermissionRequest
 import com.catmoecircle.areyouok.gateway.protocol.SendMessageRequest
+import com.catmoecircle.areyouok.gateway.protocol.TranslateRequest
+import com.catmoecircle.areyouok.gateway.protocol.TranslateResponse
+import com.catmoecircle.areyouok.gateway.protocol.TranslationProvidersResponse
 import com.catmoecircle.areyouok.gateway.protocol.UploadFileResponse
 import com.catmoecircle.areyouok.gateway.protocol.SessionState
 import com.catmoecircle.areyouok.gateway.protocol.SessionSummary
@@ -182,6 +185,47 @@ class OkHttpGatewayApi(
         val response = decodeOrThrow<PermissionCatalogResponse>(text)
         throwIfNotOk(response.ok, text, "权限目录不可用")
         return response.catalog ?: PermissionCatalog()
+    }
+
+    /**
+     * POST /v1/translate：一段文本 → 一种目标语言。
+     *
+     * 空 provider / sourceLanguage 不出现在请求体里（`explicitNulls=false`），
+     * 由网关按 `defaultProvider` / `auto` 处理。
+     */
+    override suspend fun translate(
+        text: String,
+        targetLanguage: String,
+        sourceLanguage: String?,
+        provider: String?,
+    ): TranslateResponse {
+        val body = TranslateRequest(
+            text = text,
+            targetLanguage = targetLanguage,
+            sourceLanguage = sourceLanguage?.takeIf { it.isNotBlank() },
+            provider = provider?.takeIf { it.isNotBlank() },
+        )
+        val payload = post(
+            "/translate",
+            json.encodeToString(TranslateRequest.serializer(), body),
+        )
+        val response = decodeOrThrow<TranslateResponse>(payload)
+        // 非 2xx 已在 execute() 里翻成 GatewayException；HTTP 200 + ok:false 也兜住。
+        throwIfNotOk(response.ok, payload, "翻译失败")
+        return response
+    }
+
+    /**
+     * GET /v1/translate/providers：可用服务与限制。
+     *
+     * 解析失败按 [GatewayException] 抛出；repository 只把它当「取不到分段上限」，
+     * 回落到 4000 字符，不会因此让翻译整体失败。
+     */
+    override suspend fun translationProviders(): TranslationProvidersResponse {
+        val payload = get("/translate/providers")
+        val response = decodeOrThrow<TranslationProvidersResponse>(payload)
+        throwIfNotOk(response.ok, payload, "翻译服务列表不可用")
+        return response
     }
 
     override suspend fun selectModel(
@@ -378,8 +422,10 @@ class OkHttpGatewayApi(
                 403 -> GatewayException.CODE_FORBIDDEN_SOURCE
                 404 -> GatewayException.CODE_NOT_FOUND
                 409 -> GatewayException.CODE_RESYNC_REQUIRED
+                413 -> GatewayException.CODE_TEXT_TOO_LONG
                 429 -> GatewayException.CODE_RATE_LIMITED
                 503 -> GatewayException.CODE_DSH_UNAVAILABLE
+                504 -> GatewayException.CODE_TRANSLATION_TIMEOUT
                 else -> "http_$httpCode"
             }
         val message = envelope?.error?.message?.takeIf { it.isNotBlank() }

@@ -12,6 +12,8 @@ import com.catmoecircle.areyouok.gateway.protocol.PermissionCatalog
 import com.catmoecircle.areyouok.gateway.protocol.PermissionResult
 import com.catmoecircle.areyouok.gateway.protocol.SessionState
 import com.catmoecircle.areyouok.gateway.protocol.SessionSummary
+import com.catmoecircle.areyouok.gateway.protocol.TranslateResponse
+import com.catmoecircle.areyouok.gateway.protocol.TranslationProvidersResponse
 import com.catmoecircle.areyouok.gateway.protocol.UploadFileResponse
 import com.catmoecircle.areyouok.gateway.protocol.Workspace
 import kotlinx.serialization.json.JsonElement
@@ -28,6 +30,9 @@ class GatewayException(
     val isNotFound: Boolean get() = code == CODE_NOT_FOUND || httpStatus == 404
     val isForbiddenSource: Boolean get() = code == CODE_FORBIDDEN_SOURCE || httpStatus == 403
     val isRateLimited: Boolean get() = code == CODE_RATE_LIMITED || httpStatus == 429
+
+    /** 翻译请求的文本超过网关上限（HTTP 413）：分段重发前不该出现。 */
+    val isTextTooLong: Boolean get() = code == CODE_TEXT_TOO_LONG || httpStatus == 413
     val isConflict: Boolean get() = code == CODE_RESYNC_REQUIRED || httpStatus == 409
 
     fun userMessage(): String = when {
@@ -37,6 +42,10 @@ class GatewayException(
         isRateLimited -> "请求过于频繁，请稍后重试"
         isConflict -> "状态已变化，正在重新同步"
         code == CODE_DSH_UNAVAILABLE -> "桌面 DSH 不可用"
+        isTextTooLong -> "思考内容过长，无法翻译"
+        code == CODE_TRANSLATION_FAILED -> "翻译服务返回失败"
+        code == CODE_TRANSLATION_UNAVAILABLE -> "翻译服务暂不可用"
+        code == CODE_TRANSLATION_TIMEOUT -> "翻译超时，请重试"
         else -> detail.ifBlank { code }
     }
 
@@ -48,6 +57,18 @@ class GatewayException(
         const val CODE_RATE_LIMITED = "rate_limited"
         const val CODE_DSH_UNAVAILABLE = "dsh_unavailable"
         const val CODE_RESYNC_REQUIRED = "resync_required"
+
+        /** 翻译请求文本超过网关上限（HTTP 413）。 */
+        const val CODE_TEXT_TOO_LONG = "text_too_long"
+
+        /** 翻译服务自行报错（HTTP 502）：文本没问题，但目标语言/服务端失败。 */
+        const val CODE_TRANSLATION_FAILED = "translation_failed"
+
+        /** 翻译服务不可用（HTTP 503）：网关没配翻译实现或暂时关掉。 */
+        const val CODE_TRANSLATION_UNAVAILABLE = "translation_unavailable"
+
+        /** 翻译超时（HTTP 504）：重试有意义。 */
+        const val CODE_TRANSLATION_TIMEOUT = "translation_timeout"
     }
 }
 
@@ -138,6 +159,34 @@ interface GatewayApi {
         deviceName: String,
         deviceId: String,
     ): PairResponse
+
+    /**
+     * POST /v1/translate：把一段文本交给网关内置的翻译服务（思考链专用）。
+     *
+     * 长文本由调用方先分段（见 `splitForTranslation`），这里只发一段；
+     * 超时 / 限流 / 服务不可用都以 [GatewayException] 抛出，repository 会折成
+     * 「翻译失败」状态，UI 不会因此中断。
+     *
+     * @param sourceLanguage 源语言，默认由网关自动识别。
+     * @param provider `bing` / `google`；缺省时用网关的默认实现。
+     */
+    suspend fun translate(
+        text: String,
+        targetLanguage: String,
+        sourceLanguage: String? = null,
+        provider: String? = null,
+    ): TranslateResponse = throw GatewayException(
+        GatewayException.CODE_TRANSLATION_UNAVAILABLE,
+        0,
+        "当前网关不支持翻译",
+    )
+
+    /** GET /v1/translate/providers：可用翻译服务与单次字符上限。 */
+    suspend fun translationProviders(): TranslationProvidersResponse = throw GatewayException(
+        GatewayException.CODE_TRANSLATION_UNAVAILABLE,
+        0,
+        "当前网关不支持翻译",
+    )
 
     /**
      * 取一张图的预览字节。

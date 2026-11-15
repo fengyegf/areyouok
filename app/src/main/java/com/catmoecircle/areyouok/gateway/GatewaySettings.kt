@@ -67,6 +67,30 @@ class GatewaySettings(context: Context) {
         get() = prefs.getBoolean(KEY_BUBBLE_NOTIFICATIONS, false)
         set(value) = prefs.edit().putBoolean(KEY_BUBBLE_NOTIFICATIONS, value).apply()
 
+    /**
+     * 思考链翻译总开关。默认关闭：翻译会把思考原文发给第三方服务，
+     * 必须由用户主动打开（设置页里有隐私提示）。
+     */
+    var translationEnabled: Boolean
+        get() = prefs.getBoolean(KEY_TRANSLATION_ENABLED, false)
+        set(value) = prefs.edit().putBoolean(KEY_TRANSLATION_ENABLED, value).apply()
+
+    /** 翻译服务 id：`bing` / `google`（对应网关 /v1/translate 的 provider）。 */
+    var translationProvider: String
+        get() = prefs.getString(KEY_TRANSLATION_PROVIDER, null)?.takeIf { it.isNotBlank() }
+            ?: DEFAULT_TRANSLATION_PROVIDER
+        set(value) = prefs.edit().putString(KEY_TRANSLATION_PROVIDER, value).apply()
+
+    /**
+     * 目标语言（BCP-47）。空串表示「跟随应用」——界面是中文就翻成
+     * [DEFAULT_TRANSLATION_TARGET]，由 UI 在发起翻译时解析。
+     *
+     * 这里存原始值，不在 gateway 层判断语言，避免网关层反向依赖 ui。
+     */
+    var translationTarget: String
+        get() = prefs.getString(KEY_TRANSLATION_TARGET, null).orEmpty()
+        set(value) = prefs.edit().putString(KEY_TRANSLATION_TARGET, value).apply()
+
     fun remember(endpoint: GatewayEndpoint) {
         lastBaseUrl = endpoint.baseUrl
         lastName = endpoint.name
@@ -126,6 +150,12 @@ class GatewaySettings(context: Context) {
     }
 
     companion object {
+        /** 默认翻译服务：与网关 /v1/translate/providers 的 defaultProvider 一致。 */
+        const val DEFAULT_TRANSLATION_PROVIDER = "bing"
+
+        /** 「跟随应用」实际使用的目标语言（简体中文）。 */
+        const val DEFAULT_TRANSLATION_TARGET = "zh-CN"
+
         private const val PREFS_NAME = "gateway_settings"
         private const val KEY_LAST_URL = "last_base_url"
         private const val KEY_LAST_NAME = "last_name"
@@ -137,6 +167,9 @@ class GatewaySettings(context: Context) {
         private const val KEY_NOTIFY_QUESTIONS = "notify_questions"
         private const val KEY_NOTIFY_COMPLETION = "notify_completion"
         private const val KEY_BUBBLE_NOTIFICATIONS = "bubble_notifications_enabled"
+        private const val KEY_TRANSLATION_ENABLED = "translation_enabled"
+        private const val KEY_TRANSLATION_PROVIDER = "translation_provider"
+        private const val KEY_TRANSLATION_TARGET = "translation_target"
         private const val KEY_RECENT = "recent_gateways"
         private const val MAX_RECENT = 8
     }

@@ -925,3 +925,82 @@ object InterventionAnswer {
     fun question(answers: Map<String, List<String>>): JsonObject =
         question(answers.map { (id, selected) -> QuestionAnswer(id = id, selected = selected) })
 }
+
+// ---------------------------------------------------------------- 思考链翻译
+
+/**
+ * `GET /v1/translate/providers` 的响应：可用翻译服务与限制。
+ *
+ * 客户端只用它做两件事：
+ * - 读 `maxTextChars` 决定思考链分段大小（见 `splitForTranslation`）；
+ * - 需要时展示 provider 的展示名。设置页的 Bing/Google 单选是写死的，
+ *   不依赖这个端点，网关没实现也不影响翻译开关。
+ */
+@Serializable
+data class TranslationProvidersResponse(
+    val ok: Boolean = true,
+    /** `[{id:"bing",label:"Bing",free:true}, …]`。 */
+    val providers: List<TranslationProviderInfo> = emptyList(),
+    /** 网关推荐的默认 provider（客户端缺省仍用设置里的 `bing`）。 */
+    val defaultProvider: String? = null,
+    /** 网关推荐的默认目标语言（例如 `zh-CN`）。 */
+    val defaultTargetLanguage: String? = null,
+    /** 单次请求允许的最大字符数；<=0 表示网关没给，按 [DEFAULT_MAX_TEXT_CHARS] 处理。 */
+    val maxTextChars: Int = 0,
+    /** 支持的目标语言列表（BCP-47）。 */
+    val targets: List<String> = emptyList(),
+    val error: ErrorDetail? = null,
+) {
+    /** 单次请求上限：网关缺字段或给 0 时回落到契约里的 4000。 */
+    val effectiveMaxTextChars: Int
+        get() = maxTextChars.takeIf { it > 0 } ?: DEFAULT_MAX_TEXT_CHARS
+
+    companion object {
+        /** 契约里的默认分段上限：网关未返回 `maxTextChars` 时使用。 */
+        const val DEFAULT_MAX_TEXT_CHARS = 4000
+    }
+}
+
+/** 一个可选翻译服务；`free` 表示不需要用户自己填 API Key。 */
+@Serializable
+data class TranslationProviderInfo(
+    val id: String = "",
+    val label: String = "",
+    val free: Boolean = false,
+) {
+    /** 展示名：网关没给 label 时退回 id。 */
+    val displayLabel: String
+        get() = label.ifBlank { id }
+}
+
+/** `POST /v1/translate` 的请求体。 */
+@Serializable
+data class TranslateRequest(
+    val text: String,
+    val targetLanguage: String,
+    /** 默认 `auto`：不传时网关按自动识别处理。 */
+    val sourceLanguage: String? = null,
+    val provider: String? = null,
+)
+
+/**
+ * `POST /v1/translate` 的响应：`{text,provider,targetLanguage,sourceLanguage,cached,chars}`。
+ *
+ * 失败时网关用非 2xx + `{ok:false,error:{code,message}}`；也兼容 HTTP 200 + `ok:false`。
+ */
+@Serializable
+data class TranslateResponse(
+    val ok: Boolean = true,
+    /** 译文；成功时非空。 */
+    val text: String = "",
+    /** 实际干活的 provider id（网关回显，可能和请求里的不同）。 */
+    val provider: String = "",
+    val targetLanguage: String = "",
+    /** 网关判定/回显的源语言（可能是 `auto`）。 */
+    val sourceLanguage: String? = null,
+    /** 命中网关缓存时为 true（客户端不关心，只做诊断）。 */
+    val cached: Boolean = false,
+    /** 本次实际发送的字符数。 */
+    val chars: Int = 0,
+    val error: ErrorDetail? = null,
+)

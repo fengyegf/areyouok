@@ -13,6 +13,9 @@ import com.catmoecircle.areyouok.gateway.protocol.PermissionResult
 import com.catmoecircle.areyouok.gateway.protocol.SessionState
 import com.catmoecircle.areyouok.gateway.protocol.SessionSummary
 import com.catmoecircle.areyouok.gateway.protocol.Topics
+import com.catmoecircle.areyouok.gateway.protocol.TranslateResponse
+import com.catmoecircle.areyouok.gateway.protocol.TranslationProviderInfo
+import com.catmoecircle.areyouok.gateway.protocol.TranslationProvidersResponse
 import com.catmoecircle.areyouok.gateway.protocol.EventFrame
 import com.catmoecircle.areyouok.gateway.protocol.Workspace
 import com.catmoecircle.areyouok.gateway.transport.GatewayApi
@@ -45,6 +48,46 @@ class FakeGatewayApi : GatewayApi {
     var createSessionResponse = CreateSessionResponse(ok = true, sessionId = "s-new")
     var pairResponse = PairResponse(ok = true, deviceToken = "tok-123")
     var error: Throwable? = null
+
+    /** 只在 `POST /v1/translate` 时抛的失败注入（不影响 providers 探测）。 */
+    var translationError: Throwable? = null
+
+    /** 只在 `GET /v1/translate/providers` 时抛的失败注入。 */
+    var translationProvidersError: Throwable? = null
+
+    /**
+     * 可编程的翻译应答：默认按「[目标语言] 原文」回；测试可替换成计数/挂起实现
+     * （分段顺序、加载态观察都靠它）。
+     */
+    var translateHandler: suspend (
+        text: String,
+        targetLanguage: String,
+        sourceLanguage: String?,
+        provider: String?,
+    ) -> TranslateResponse = { text, targetLanguage, sourceLanguage, provider ->
+        TranslateResponse(
+            text = "[$targetLanguage]$text",
+            provider = provider ?: "bing",
+            targetLanguage = targetLanguage,
+            sourceLanguage = sourceLanguage ?: "auto",
+            chars = text.length,
+        )
+    }
+
+    /** `GET /v1/translate/providers` 的应答（默认与网关契约一致）。 */
+    var translationProvidersResponse = TranslationProvidersResponse(
+        providers = listOf(
+            TranslationProviderInfo(id = "bing", label = "Bing", free = true),
+            TranslationProviderInfo(id = "google", label = "Google", free = true),
+        ),
+        defaultProvider = "bing",
+        defaultTargetLanguage = "zh-CN",
+        maxTextChars = TranslationProvidersResponse.DEFAULT_MAX_TEXT_CHARS,
+        targets = listOf("zh-CN", "zh-TW", "en", "ja"),
+    )
+
+    /** 每次 `POST /v1/translate` 的入参（保序）。 */
+    val translationRequests = mutableListOf<TranslationRequestRecord>()
 
     val sentMessages = mutableListOf<Triple<String, String, String>>()
     /** 每次 `POST /v1/sessions/{id}/messages` 带上的文件回执 id。 */
@@ -174,10 +217,36 @@ class FakeGatewayApi : GatewayApi {
         return pairResponse
     }
 
+    override suspend fun translate(
+        text: String,
+        targetLanguage: String,
+        sourceLanguage: String?,
+        provider: String?,
+    ): TranslateResponse {
+        maybeThrow()
+        translationError?.let { throw it }
+        translationRequests += TranslationRequestRecord(text, targetLanguage, sourceLanguage, provider)
+        return translateHandler(text, targetLanguage, sourceLanguage, provider)
+    }
+
+    override suspend fun translationProviders(): TranslationProvidersResponse {
+        maybeThrow()
+        translationProvidersError?.let { throw it }
+        return translationProvidersResponse
+    }
+
     private fun maybeThrow() {
         error?.let { throw it }
     }
 }
+
+/** 一次 `POST /v1/translate` 的入参记录。 */
+data class TranslationRequestRecord(
+    val text: String,
+    val targetLanguage: String,
+    val sourceLanguage: String?,
+    val provider: String?,
+)
 
 /** 一次 `POST /v1/sessions/{id}/model` 的入参记录。 */
 data class SelectedModel(

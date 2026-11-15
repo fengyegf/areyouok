@@ -18,6 +18,7 @@ import com.catmoecircle.areyouok.gateway.protocol.SendMessageRequest
 import com.catmoecircle.areyouok.gateway.protocol.ServerEvent
 import com.catmoecircle.areyouok.gateway.protocol.SessionSummary
 import com.catmoecircle.areyouok.gateway.protocol.Topics
+import com.catmoecircle.areyouok.gateway.protocol.TranslationProvidersResponse
 import com.catmoecircle.areyouok.gateway.protocol.Workspace
 import com.catmoecircle.areyouok.gateway.protocol.bool
 import com.catmoecircle.areyouok.gateway.protocol.eventKind
@@ -41,6 +42,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonElement
@@ -102,6 +104,22 @@ class GatewayRepository(
     /** 本机沙箱权限目录；网关未实现该端点时是空目录（UI 隐藏权限入口）。 */
     private val _permissionCatalog = MutableStateFlow(PermissionCatalog())
     val permissionCatalog: StateFlow<PermissionCatalog> = _permissionCatalog.asStateFlow()
+
+    /**
+     * 思考链翻译状态（按 messageId 缓存，UI 直接按消息 id 查）。
+     *
+     * 只有用户展开思考行、且这条消息已经停止流式时才发起请求（见 `ThinkingRow`）。
+     * 失败只落成 [ThinkingTranslationStatus.FAILED]，不向 UI 抛异常。
+     */
+    private val _translations = MutableStateFlow<Map<String, ThinkingTranslation>>(emptyMap())
+    val translations: StateFlow<Map<String, ThinkingTranslation>> = _translations.asStateFlow()
+
+    /** 正在请求翻译的 messageId：同一消息不重复发起（展开/重试连点不会打爆网关）。 */
+    private val translationInFlight = HashSet<String>()
+
+    /** 网关给的「单次翻译字符上限」缓存；null 表示还没问到，取不到时用 4000。 */
+    @Volatile
+    private var translationMaxChars: Int? = null
 
     private val _notices = MutableSharedFlow<GatewayNotice>(extraBufferCapacity = 32)
     val notices: SharedFlow<GatewayNotice> = _notices.asSharedFlow()
@@ -1281,6 +1299,124 @@ class GatewayRepository(
     suspend fun answerQuestion(eventId: String, answers: Map<String, List<String>>): Boolean =
         answerQuestion(eventId, answers.map { (id, selected) -> QuestionAnswer(id = id, selected = selected) })
 
+    /**
+     * 清空翻译缓存：切换翻译服务 / 目标语言后调用，展开中的思考行会按新参数重翻。
+     *
+     * 只清缓存，不主动请求：真正发请求仍然由用户展开的思考行触发。
+     */
+    fun clearTranslations() {
+        _translations.value = emptyMap()
+    }
+
+    /**
+     * 翻译一条思考消息（展开思考行时触发；失败只返回 FAILED，不抛给 UI）。
+     *
+     * - 同一 messageId + provider + 目标语言已有译文或正在加载时直接复用，不重复请求；
+     * - 长文本按 [splitForTranslation] 分段后**串行**请求，再按原顺序拼接（保序、避免限流）；
+     * - 换 provider / 目标语言按新参数重翻，旧译文保留到新结果返回；
+     * - 用户在请求途中取消（离开页面）时状态复位成 IDLE，不留「翻译中」残影。
+     */
+    suspend fun translateThinking(
+        messageId: String,
+        text: String,
+        provider: String,
+        targetLanguage: String,
+    ): ThinkingTranslation {
+        val trimmed = text.trim()
+        if (messageId.isBlank() || trimmed.isEmpty()) return ThinkingTranslation.Idle
+        val providerId = provider.trim().ifBlank { DEFAULT_TRANSLATION_PROVIDER }
+        val target = targetLanguage.trim().ifBlank { DEFAULT_TRANSLATION_TARGET }
+        val requestKey = translationRequestKey(providerId, target)
+
+        _translations.value[messageId]?.let { current ->
+            if (current.requestKey == requestKey && (current.isLoading || current.isDone)) return current
+        }
+        if (!beginTranslationRequest(messageId)) {
+            // 同一消息已有请求在飞：把当前状态交回 UI，结果靠 StateFlow 推。
+            return _translations.value[messageId]
+                ?: ThinkingTranslation.loading(providerId, target, requestKey)
+                    .also { publishTranslation(messageId, it) }
+        }
+
+        publishTranslation(messageId, ThinkingTranslation.loading(providerId, target, requestKey))
+        return try {
+            val done = requestTranslation(trimmed, providerId, target, requestKey)
+            publishTranslation(messageId, done)
+            done
+        } catch (cancelled: CancellationException) {
+            // 取消不是失败：清掉「翻译中」，下次展开重新发起。
+            publishTranslation(messageId, ThinkingTranslation.Idle)
+            throw cancelled
+        } catch (error: Throwable) {
+            val failed = ThinkingTranslation.failed(
+                message = error.toUserMessage(),
+                provider = providerId,
+                targetLanguage = target,
+                requestKey = requestKey,
+                // 参数错误重试也没用；其余（超时/限流/服务不可用）都值得重试。
+                retryable = (error as? GatewayException)?.code != GatewayException.CODE_INVALID_REQUEST,
+            )
+            publishTranslation(messageId, failed)
+            failed
+        } finally {
+            endTranslationRequest(messageId)
+        }
+    }
+
+    /** 分段翻译并保序拼接；任一片段失败都抛给 [translateThinking] 折成 FAILED。 */
+    private suspend fun requestTranslation(
+        text: String,
+        provider: String,
+        targetLanguage: String,
+        requestKey: String,
+    ): ThinkingTranslation {
+        val chunks = splitForTranslation(text, translationChunkLimit())
+        if (chunks.isEmpty()) return ThinkingTranslation.Idle
+        val parts = ArrayList<String>(chunks.size)
+        var actualProvider = provider
+        for (chunk in chunks) {
+            val response = transport.api.translate(
+                text = chunk,
+                targetLanguage = targetLanguage,
+                provider = provider,
+            )
+            val translated = response.text.trim()
+            if (translated.isEmpty()) {
+                throw GatewayException(GatewayException.CODE_TRANSLATION_FAILED, 0, "翻译结果为空")
+            }
+            response.provider.takeIf { it.isNotBlank() }?.let { actualProvider = it }
+            parts += translated
+        }
+        return ThinkingTranslation.done(
+            text = parts.joinToString(TRANSLATION_CHUNK_JOIN),
+            provider = actualProvider,
+            targetLanguage = targetLanguage,
+            requestKey = requestKey,
+        )
+    }
+
+    /** 分段上限：优先用网关 /v1/translate/providers 的 maxTextChars，取不到回落 4000。 */
+    private suspend fun translationChunkLimit(): Int {
+        translationMaxChars?.let { return it }
+        val max = runCatching { transport.api.translationProviders() }
+            .getOrNull()
+            ?.effectiveMaxTextChars
+            ?: DEFAULT_TRANSLATION_MAX_CHARS
+        translationMaxChars = max
+        return max
+    }
+
+    private fun publishTranslation(messageId: String, translation: ThinkingTranslation) {
+        _translations.update { current -> current + (messageId to translation) }
+    }
+
+    private fun beginTranslationRequest(messageId: String): Boolean =
+        synchronized(translationInFlight) { translationInFlight.add(messageId) }
+
+    private fun endTranslationRequest(messageId: String) {
+        synchronized(translationInFlight) { translationInFlight.remove(messageId) }
+    }
+
     fun close() {
         disconnect()
         runCatching { transport.shutdown() }
@@ -1328,3 +1464,187 @@ class GatewayRepository(
         const val CAPABILITY_TURN_COMPLETED = "turn.completed"
     }
 }
+
+// ---------------------------------------------------------------- 思考链翻译
+
+/** 思考链翻译状态机的四种状态（UI 只读，不自己跑请求）。 */
+enum class ThinkingTranslationStatus { IDLE, LOADING, DONE, FAILED }
+
+/**
+ * 一条思考消息的翻译快照（repository 按 messageId 缓存在 [GatewayRepository.translations]）。
+ *
+ * 失败只落到 FAILED 并带上可直接展示的中文原因：UI 保留原文 + 显示「重试」，
+ * 不会因为翻译失败打断对话。
+ */
+data class ThinkingTranslation(
+    val status: ThinkingTranslationStatus = ThinkingTranslationStatus.IDLE,
+    /** 译文；只有 DONE 时才有值。 */
+    val text: String? = null,
+    /** 实际干活的翻译服务（网关回显）。 */
+    val provider: String = "",
+    /** 目标语言（BCP-47，如 `zh-CN`）。 */
+    val targetLanguage: String = "",
+    /** 失败原因（中文）；FAILED 时用于展示。 */
+    val message: String? = null,
+    /** 失败是否值得重试（参数错误之类重试也没用）。 */
+    val retryable: Boolean = true,
+    /** 请求参数指纹：provider + 目标语言变了就按新参数重翻。 */
+    val requestKey: String = "",
+) {
+    val isIdle: Boolean get() = status == ThinkingTranslationStatus.IDLE
+    val isLoading: Boolean get() = status == ThinkingTranslationStatus.LOADING
+    val isDone: Boolean get() = status == ThinkingTranslationStatus.DONE
+    val isFailed: Boolean get() = status == ThinkingTranslationStatus.FAILED
+
+    /** 可展示的译文（空串按「没有译文」处理）。 */
+    val displayText: String?
+        get() = text?.takeIf { it.isNotBlank() }
+
+    companion object {
+        /** 还没翻译（或取消后复位）。 */
+        val Idle: ThinkingTranslation = ThinkingTranslation()
+
+        fun loading(provider: String, targetLanguage: String, requestKey: String): ThinkingTranslation =
+            ThinkingTranslation(
+                status = ThinkingTranslationStatus.LOADING,
+                provider = provider,
+                targetLanguage = targetLanguage,
+                requestKey = requestKey,
+            )
+
+        fun done(text: String, provider: String, targetLanguage: String, requestKey: String): ThinkingTranslation =
+            ThinkingTranslation(
+                status = ThinkingTranslationStatus.DONE,
+                text = text,
+                provider = provider,
+                targetLanguage = targetLanguage,
+                requestKey = requestKey,
+            )
+
+        fun failed(
+            message: String,
+            provider: String,
+            targetLanguage: String,
+            requestKey: String,
+            retryable: Boolean = true,
+        ): ThinkingTranslation = ThinkingTranslation(
+            status = ThinkingTranslationStatus.FAILED,
+            provider = provider,
+            targetLanguage = targetLanguage,
+            message = message,
+            retryable = retryable,
+            requestKey = requestKey,
+        )
+    }
+}
+
+/** 默认翻译服务（网关契约里的 defaultProvider）。 */
+internal const val DEFAULT_TRANSLATION_PROVIDER = "bing"
+
+/** 「跟随应用」实际使用的目标语言：简体中文。 */
+internal const val DEFAULT_TRANSLATION_TARGET = "zh-CN"
+
+/** 网关没给 maxTextChars 时的分段上限。 */
+internal const val DEFAULT_TRANSLATION_MAX_CHARS = TranslationProvidersResponse.DEFAULT_MAX_TEXT_CHARS
+
+/** 多个片段译文之间的连接符：分段只发生在段落边界，用空行还原段落结构。 */
+private const val TRANSLATION_CHUNK_JOIN = "\n\n"
+
+/** 翻译请求参数指纹（provider + 目标语言）。 */
+internal fun translationRequestKey(provider: String, targetLanguage: String): String =
+    provider.trim() + "|" + targetLanguage.trim()
+
+/** 连续 2 个以上换行视为段落分隔（空行）。 */
+private val PARAGRAPH_SEPARATOR = Regex("\n{2,}")
+
+/** 句末标点：中英文都覆盖，切在这里读者不会觉得断在半句。 */
+private val SENTENCE_ENDINGS = charArrayOf('。', '！', '？', '.', '!', '?', '；', ';')
+
+/**
+ * 把一段思考链切成 ≤ [maxChars] 个 UTF-16 码元的片段（纯函数，便于 JVM 单测）。
+ *
+ * 规则（对齐 DSH 官方 cot-translation 的分片行为）：
+ * - 优先按**空行/段落**切：相邻短段落会合并到同一片段，片段之间用空行连接；
+ * - 单段超长时再按换行 → 句末标点 → 空白退让，仍找不到边界就硬切；
+ * - **绝不切断代理对**（emoji 等 4 字节字符）：边界落在高/低代理之间时前后挪一位；
+ * - 跳过空段（连续空行、首尾空白不产生空片段）；
+ * - 输入为空/全空白返回空列表（调用方据此跳过请求）。
+ *
+ * @param maxChars 单段上限（UTF-16 码元）；非正数按 1 处理（此时允许 2 个码元的代理对一起输出）。
+ */
+fun splitForTranslation(text: String, maxChars: Int = DEFAULT_TRANSLATION_MAX_CHARS): List<String> {
+    val limit = maxChars.coerceAtLeast(1)
+    val normalized = text.replace("\r\n", "\n").replace('\r', '\n')
+    if (normalized.isBlank()) return emptyList()
+
+    val chunks = ArrayList<String>()
+    val buffer = StringBuilder()
+    fun flush() {
+        val pending = buffer.toString().trim()
+        if (pending.isNotEmpty()) chunks.add(pending)
+        buffer.setLength(0)
+    }
+
+    for (rawParagraph in normalized.split(PARAGRAPH_SEPARATOR)) {
+        val paragraph = rawParagraph.trim()
+        if (paragraph.isEmpty()) continue
+        if (paragraph.length <= limit) {
+            if (buffer.isEmpty()) {
+                buffer.append(paragraph)
+            } else if (buffer.length + 2 + paragraph.length <= limit) {
+                buffer.append("\n\n").append(paragraph)
+            } else {
+                flush()
+                buffer.append(paragraph)
+            }
+        } else {
+            flush()
+            chunks += splitOverlongParagraph(paragraph, limit)
+        }
+    }
+    flush()
+    return chunks
+}
+
+/**
+ * 超长段落切分：先找换行、句末标点等自然边界，退让不到就硬切。
+ *
+ * 退让至少发生在片段前半段之后（`cut / 2`）才采用，避免切出大量极短片段。
+ */
+private fun splitOverlongParagraph(paragraph: String, limit: Int): List<String> {
+    val parts = ArrayList<String>()
+    var rest = paragraph
+    while (rest.length > limit) {
+        var cut = safeCut(rest, limit)
+        val window = rest.substring(0, cut)
+        val newline = window.lastIndexOf('\n')
+        val sentence = window.indexOfLast { it in SENTENCE_ENDINGS }
+        val natural = maxOf(newline, sentence)
+        if (natural > 0 && natural >= cut / 2) cut = safeCut(rest, natural)
+        val piece = rest.substring(0, cut).trim()
+        if (piece.isNotEmpty()) parts += piece
+        rest = rest.substring(cut).trimStart()
+    }
+    val tail = rest.trim()
+    if (tail.isNotEmpty()) parts += tail
+    return parts
+}
+
+/**
+ * 把 [limit] 修正到「不落在代理对中间」的位置。
+ *
+ * 若第 limit-1 个码元是高代理、第 limit 个是低代理，则退 1；退到 0 时
+ * 反过来前进 1，把整个代理对留在同一片段（宁可超出上限也不切碎 emoji）。
+ */
+private fun safeCut(text: String, limit: Int): Int {
+    if (limit <= 0) return 0
+    if (limit >= text.length) return text.length
+    val before = text[limit - 1]
+    val after = text[limit]
+    if (!isHighSurrogate(before) || !isLowSurrogate(after)) return limit
+    return if (limit - 1 > 0) limit - 1 else limit + 1
+}
+
+private fun isHighSurrogate(c: Char): Boolean = c in '\uD800'..'\uDBFF'
+
+private fun isLowSurrogate(c: Char): Boolean = c in '\uDC00'..'\uDFFF'

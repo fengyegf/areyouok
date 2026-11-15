@@ -117,10 +117,12 @@ import com.catmoecircle.areyouok.gateway.protocol.SendMessageRequest
 import com.catmoecircle.areyouok.gateway.protocol.SessionSummary
 import com.catmoecircle.areyouok.gateway.protocol.effectivePermissionPreset
 import com.catmoecircle.areyouok.gateway.repository.ChatMessage
+import com.catmoecircle.areyouok.gateway.repository.ChatRole
 import com.catmoecircle.areyouok.gateway.repository.SessionProject
 import com.catmoecircle.areyouok.gateway.repository.SessionProjectGrouping
 import com.catmoecircle.areyouok.gateway.repository.ConnectionState
 import com.catmoecircle.areyouok.gateway.repository.ConnectionPhase
+import com.catmoecircle.areyouok.gateway.repository.ThinkingTranslation
 import com.catmoecircle.areyouok.gateway.service.GatewayChannels
 import com.catmoecircle.areyouok.gateway.service.GatewayService
 import com.catmoecircle.areyouok.gateway.transport.GatewayEndpoint
@@ -231,6 +233,7 @@ fun ChatScreen(modifier: Modifier = Modifier) {
     val pendingInterventions by repository.pendingInterventions.collectAsState()
     val modelCatalog by repository.modelCatalog.collectAsState()
     val permissionCatalog by repository.permissionCatalog.collectAsState()
+    val translations by repository.translations.collectAsState()
     val selectedSession = remember(sessions, selectedSessionId) {
         sessions.firstOrNull { it.id == selectedSessionId }
     }
@@ -260,6 +263,10 @@ fun ChatScreen(modifier: Modifier = Modifier) {
     var workStepFoldedReplies by remember {
         mutableStateOf(WorkStepFoldedReplies.fromStorage(runtime.settings.workStepFoldedReplies))
     }
+    // 思考链翻译：开关/服务/目标语言都存本地偏好，展开思考行时才真正发请求。
+    var translationEnabled by remember { mutableStateOf(runtime.settings.translationEnabled) }
+    var translationProvider by remember { mutableStateOf(runtime.settings.translationProvider) }
+    var translationTarget by remember { mutableStateOf(runtime.settings.translationTarget) }
     var notificationPermissionGranted by remember {
         mutableStateOf(isNotificationPermissionGranted(context))
     }
@@ -589,6 +596,40 @@ fun ChatScreen(modifier: Modifier = Modifier) {
             workStepDisplay = workStepDisplay,
             workStepCollapseTiming = workStepCollapseTiming,
             workStepFoldedReplies = workStepFoldedReplies,
+            translationEnabled = translationEnabled,
+            translations = translations,
+            onTranslate = { message ->
+                // 只翻已落定的思考消息：流式中先显示原文，落定后 ThinkingRow 会再触发一次。
+                if (message.role == ChatRole.THINKING && !message.streaming && message.text.isNotBlank()) {
+                    scope.launch {
+                        repository.translateThinking(
+                            messageId = message.id,
+                            text = message.text,
+                            provider = translationProvider,
+                            targetLanguage = translationTarget.ifBlank {
+                                GatewaySettings.DEFAULT_TRANSLATION_TARGET
+                            },
+                        )
+                    }
+                }
+            },
+            translationProvider = translationProvider,
+            translationTarget = translationTarget,
+            onTranslationEnabledChange = { enabled ->
+                translationEnabled = enabled
+                runtime.settings.translationEnabled = enabled
+            },
+            onTranslationProviderChange = { id ->
+                translationProvider = id
+                runtime.settings.translationProvider = id
+                // 换服务后旧译文不再有效：清缓存，展开中的思考行会按新参数重翻。
+                repository.clearTranslations()
+            },
+            onTranslationTargetChange = { language ->
+                translationTarget = language
+                runtime.settings.translationTarget = language
+                repository.clearTranslations()
+            },
             modifier = chatModifier,
         )
 
@@ -626,6 +667,23 @@ fun ChatScreen(modifier: Modifier = Modifier) {
                 workStepDisplay = workStepDisplay,
                 workStepCollapseTiming = workStepCollapseTiming,
                 workStepFoldedReplies = workStepFoldedReplies,
+                translationEnabled = translationEnabled,
+                translationProvider = translationProvider,
+                translationTarget = translationTarget,
+                onTranslationEnabledChange = { enabled ->
+                    translationEnabled = enabled
+                    runtime.settings.translationEnabled = enabled
+                },
+                onTranslationProviderChange = { id ->
+                    translationProvider = id
+                    runtime.settings.translationProvider = id
+                    repository.clearTranslations()
+                },
+                onTranslationTargetChange = { language ->
+                    translationTarget = language
+                    runtime.settings.translationTarget = language
+                    repository.clearTranslations()
+                },
                 deviceName = runtime.deviceName,
                 onBack = {
                     if (!pairing) {
@@ -771,6 +829,19 @@ fun ChatScreenContent(
     workStepDisplay: WorkStepDisplay = WorkStepDisplay.DEFAULT,
     workStepCollapseTiming: WorkStepCollapseTiming = WorkStepCollapseTiming.DEFAULT,
     workStepFoldedReplies: WorkStepFoldedReplies = WorkStepFoldedReplies.DEFAULT,
+    /** 思考链翻译开关：打开后展开的思考行显示译文/原文切换。 */
+    translationEnabled: Boolean = false,
+    /** 按 messageId 索引的翻译状态（repository.translations）。 */
+    translations: Map<String, ThinkingTranslation> = emptyMap(),
+    /** 请求翻译（展开 / 点重试）；默认空实现，旧调用方行为不变。 */
+    onTranslate: (ChatMessage) -> Unit = {},
+    /** 翻译服务当前值（设置页展示）。 */
+    translationProvider: String = GatewaySettings.DEFAULT_TRANSLATION_PROVIDER,
+    /** 目标语言；空串表示跟随应用（中文）。 */
+    translationTarget: String = "",
+    onTranslationEnabledChange: (Boolean) -> Unit = {},
+    onTranslationProviderChange: (String) -> Unit = {},
+    onTranslationTargetChange: (String) -> Unit = {},
     /** 通知气泡开关（设置页）。 */
     bubbleEnabled: Boolean = false,
     /** 系统是否允许本应用使用气泡通知。 */
@@ -880,6 +951,9 @@ fun ChatScreenContent(
                 workStepDisplay = workStepDisplay,
                 workStepCollapseTiming = workStepCollapseTiming,
                 workStepFoldedReplies = workStepFoldedReplies,
+                translationEnabled = translationEnabled,
+                translations = translations,
+                onTranslate = onTranslate,
                 running = state.running,
                 hasOlder = state.hasOlderMessages,
                 loadingOlder = state.loadingOlderMessages,
@@ -1730,6 +1804,7 @@ private fun isNotificationPermissionGranted(context: Context): Boolean {
         Manifest.permission.POST_NOTIFICATIONS,
     ) == PackageManager.PERMISSION_GRANTED
 }
+
 
 /** 设备列表：把当前连接（可能来自 mDNS / 深链）补进最近列表，避免当前设备不显示。 */
 private fun mergeSettingsDevices(

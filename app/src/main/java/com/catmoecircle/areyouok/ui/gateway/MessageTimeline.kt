@@ -52,6 +52,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -61,8 +62,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -78,6 +79,7 @@ import androidx.compose.ui.unit.sp
 import com.catmoecircle.areyouok.R
 import com.catmoecircle.areyouok.gateway.repository.ChatMessage
 import com.catmoecircle.areyouok.gateway.repository.ChatRole
+import com.catmoecircle.areyouok.gateway.repository.ThinkingTranslation
 import com.catmoecircle.areyouok.gateway.repository.toolPathFileName
 import com.catmoecircle.areyouok.ui.gateway.markdown.MarkdownText
 import com.catmoecircle.areyouok.ui.settings.WorkStepCollapseTiming
@@ -125,6 +127,12 @@ fun MessageTimeline(
     workStepDisplay: WorkStepDisplay = WorkStepDisplay.DEFAULT,
     workStepCollapseTiming: WorkStepCollapseTiming = WorkStepCollapseTiming.DEFAULT,
     workStepFoldedReplies: WorkStepFoldedReplies = WorkStepFoldedReplies.DEFAULT,
+    /** 思考链翻译开关：打开后展开的思考行显示译文/原文切换（折叠摘要永远原文）。 */
+    translationEnabled: Boolean = false,
+    /** 按 messageId 索引的翻译状态（repository 的 `translations`）。 */
+    translations: Map<String, ThinkingTranslation> = emptyMap(),
+    /** 请求翻译（展开或点「重试」时触发）；默认空实现，旧调用方行为不变。 */
+    onTranslate: (ChatMessage) -> Unit = {},
     running: Boolean = false,
     hasOlder: Boolean = false,
     loadingOlder: Boolean = false,
@@ -282,8 +290,21 @@ fun MessageTimeline(
                     // 历史里未被结果配对的调用不会误显示成还在跑。
                     val liveTail = running && index == entries.lastIndex
                     when (val entry = entries[index]) {
-                        is TimelineEntry.Single -> MessageRow(entry.message, workStepDisplay, liveTail)
-                        is TimelineEntry.WorkGroup -> WorkGroupCard(entry, workStepDisplay)
+                        is TimelineEntry.Single -> MessageRow(
+                            message = entry.message,
+                            workStepDisplay = workStepDisplay,
+                            live = liveTail,
+                            translationEnabled = translationEnabled,
+                            translations = translations,
+                            onTranslate = onTranslate,
+                        )
+                        is TimelineEntry.WorkGroup -> WorkGroupCard(
+                            group = entry,
+                            level = workStepDisplay,
+                            translationEnabled = translationEnabled,
+                            translations = translations,
+                            onTranslate = onTranslate,
+                        )
                     }
                 }
             }
@@ -462,11 +483,24 @@ private fun LazyListState.isAtBottom(margin: Int = 8): Boolean {
 // ------------------------------------------------------------------ 渲染
 
 @Composable
-private fun MessageRow(message: ChatMessage, workStepDisplay: WorkStepDisplay, live: Boolean) {
+private fun MessageRow(
+    message: ChatMessage,
+    workStepDisplay: WorkStepDisplay,
+    live: Boolean,
+    translationEnabled: Boolean,
+    translations: Map<String, ThinkingTranslation>,
+    onTranslate: (ChatMessage) -> Unit,
+) {
     when (message.role) {
         ChatRole.USER -> UserBubble(message)
         ChatRole.ASSISTANT -> AssistantBubble(message)
-        ChatRole.THINKING -> ThinkingRow(message, workStepDisplay)
+        ChatRole.THINKING -> ThinkingRow(
+            message = message,
+            level = workStepDisplay,
+            translationEnabled = translationEnabled,
+            translation = translations[message.id],
+            onTranslate = onTranslate,
+        )
         ChatRole.TOOL -> ToolStepRow(message, workStepDisplay, live)
         ChatRole.SYSTEM -> SystemLine(message)
         ChatRole.QUESTION -> AnsweredQuestionCard(message)
@@ -531,11 +565,18 @@ private fun AssistantBubble(message: ChatMessage) {
 /**
  * 思考链折叠行：默认收起，档位决定折叠态露出多少（简洁无摘要、标准起露出首行），
  * 点开看完整思考过程。与正文严格分开，避免「思考内容」混进汇报里。
+ *
+ * 打开翻译开关后，展开即自动翻译，正文上方只有一个「查看原文 / 查看译文」入口 +
+ * 翻译状态（翻译中 / 失败重试）。折叠摘要（hint）永远是原文首行：
+ * 摘要不翻译，避免「没展开就看到译文」和列表里闪来闪去。
  */
 @Composable
 private fun ThinkingRow(
     message: ChatMessage,
     level: WorkStepDisplay,
+    translationEnabled: Boolean,
+    translation: ThinkingTranslation?,
+    onTranslate: (ChatMessage) -> Unit,
     /** 分组内由分组正文统一限高滚动，行自己不再套一层滚动。 */
     capsBody: Boolean = true,
 ) {
@@ -552,6 +593,36 @@ private fun ThinkingRow(
     } else {
         null
     }
+    // 展开态默认看译文；用户切回原文后记住选择（换 provider / 目标语言不重置）。
+    var showTranslated by rememberSaveable(
+        message.id,
+        key = "thinking-lang#${message.id}",
+    ) {
+        mutableStateOf(true)
+    }
+    // onTranslate 每次重组都是新 lambda：用 rememberUpdatedState 取最新实现，避免效应抖动。
+    val requestTranslation = rememberUpdatedState(onTranslate)
+
+    // 只在「开关打开 + 已展开 + 消息不再流式」时自动请求一次：
+    // 流式中展开先显示原文，消息落定（streaming 变 false）这里会再触发一次；
+    // 失败后不自动重试，交给用户点「重试」，避免反复打到可能限流的翻译服务。
+    LaunchedEffect(
+        translationEnabled,
+        expanded,
+        message.id,
+        message.streaming,
+        message.text.length,
+        translation?.status,
+        translation?.requestKey,
+    ) {
+        if (!translationEnabled || !expanded) return@LaunchedEffect
+        if (message.streaming || message.text.isBlank()) return@LaunchedEffect
+        val current = translation
+        if (current != null && (current.isDone || current.isLoading || current.isFailed)) {
+            return@LaunchedEffect
+        }
+        requestTranslation.value(message)
+    }
 
     StepRow(
         shape = ThinkingShape,
@@ -564,15 +635,161 @@ private fun ThinkingRow(
         onToggle = { expanded = !expanded },
         capExpandedHeight = capsBody,
     ) {
-        SelectionContainer {
-            MarkdownText(
-                markdown = message.text,
-                color = colorScheme.onSurfaceVariant.copy(alpha = 0.92f),
-                fontSize = 13.sp,
-                lineHeight = 20.sp,
+        if (translationEnabled) {
+            ThinkingTranslationBar(
+                translation = translation,
+                streaming = message.streaming,
+                showTranslated = showTranslated,
+                onShowTranslatedChange = { showTranslated = it },
+                onRetry = { requestTranslation.value(message) },
+            )
+        }
+        val translatedText = translation?.takeIf { it.isDone }?.displayText
+        when {
+            // 没开翻译 / 用户切回原文：原文永远可访问。
+            !translationEnabled || !showTranslated -> ThinkingOriginalText(message)
+            translatedText != null -> ThinkingTranslatedText(translatedText)
+            // 译文还没就绪（翻译中 / 失败 / 流式）时先看原文：展开不出现空白面板，
+            // 翻译完成后自动切换到译文；失败时工具行上有「重试」。
+            else -> ThinkingOriginalText(message)
+        }
+    }
+}
+
+/** 思考原文：与译文共用同一套 Markdown 样式，切换时视觉不跳。 */
+@Composable
+private fun ThinkingOriginalText(message: ChatMessage) {
+    val colorScheme = MaterialTheme.colorScheme
+    SelectionContainer {
+        MarkdownText(
+            markdown = message.text,
+            color = colorScheme.onSurfaceVariant.copy(alpha = 0.92f),
+            fontSize = 13.sp,
+            lineHeight = 20.sp,
+        )
+    }
+}
+
+/** 译文正文：同样走 Markdown（思考链里常有列表、代码片段和链接）。 */
+@Composable
+private fun ThinkingTranslatedText(text: String) {
+    val colorScheme = MaterialTheme.colorScheme
+    SelectionContainer {
+        MarkdownText(
+            markdown = text,
+            color = colorScheme.onSurfaceVariant.copy(alpha = 0.92f),
+            fontSize = 13.sp,
+            lineHeight = 20.sp,
+        )
+    }
+}
+
+/**
+ * 展开思考行顶部的翻译入口：一个常显的「查看原文 / 查看译文」入口 + 状态。
+ *
+ * 与 DSH 桌面端一致：展开即翻译，正文默认译文，入口写「查看原文」；点一下切回原文，
+ * 入口变成「查看译文」。翻译中/失败时入口旁边显示状态，失败可重试。
+ * 这条工具行只在展开态出现——折叠摘要永远原文，不翻译。
+ */
+@Composable
+private fun ThinkingTranslationBar(
+    translation: ThinkingTranslation?,
+    streaming: Boolean,
+    showTranslated: Boolean,
+    onShowTranslatedChange: (Boolean) -> Unit,
+    onRetry: () -> Unit,
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    val done = translation?.isDone == true
+    val loading = translation?.isLoading == true
+    val failed = translation?.isFailed == true
+
+    // 还没有译文可看：流式中只提示「等思考结束」，其余情况这行不出现。
+    if (translation == null) {
+        if (!streaming) return
+        TranslationStatusText(
+            text = stringResource(R.string.thinking_translation_wait_finish),
+            color = colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+        )
+        return
+    }
+    // 失败且没有译文：保留原文，入口让位给「翻译失败 + 重试」。
+    if (failed && !done) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            TranslationStatusText(
+                text = translation.message?.takeIf { it.isNotBlank() }
+                    ?: stringResource(R.string.thinking_translation_failed),
+                color = colorScheme.error.copy(alpha = 0.85f),
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            if (translation.retryable) {
+                TranslationStatusText(
+                    text = stringResource(R.string.thinking_translation_retry),
+                    color = colorScheme.primary,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable(role = Role.Button, onClick = onRetry)
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
+        }
+        return
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 1.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (loading) {
+            // 译文还没回来：正文仍是原文，这一行只报状态，不出现「查看原文」入口。
+            TranslationStatusText(
+                text = stringResource(R.string.thinking_translation_loading),
+                color = colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            )
+        } else {
+            // 单一入口：当前看译文 → 「查看原文」；当前看原文 → 「查看译文」。
+            Text(
+                text = stringResource(
+                    if (showTranslated) {
+                        R.string.thinking_translation_show_original
+                    } else {
+                        R.string.thinking_translation_show_translated
+                    },
+                ),
+                color = colorScheme.primary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable(role = Role.Button) { onShowTranslatedChange(!showTranslated) }
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
             )
         }
     }
+}
+
+/** 工具行里的状态字：单行、浅色，不抢正文。 */
+@Composable
+private fun TranslationStatusText(
+    text: String,
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        text = text,
+        color = color,
+        fontSize = 11.sp,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier,
+    )
 }
 
 /**
@@ -582,7 +799,13 @@ private fun ThinkingRow(
  * （「已读取文件、执行了命令」）；点按展开组内每一行。
  */
 @Composable
-private fun WorkGroupCard(group: TimelineEntry.WorkGroup, level: WorkStepDisplay) {
+private fun WorkGroupCard(
+    group: TimelineEntry.WorkGroup,
+    level: WorkStepDisplay,
+    translationEnabled: Boolean,
+    translations: Map<String, ThinkingTranslation>,
+    onTranslate: (ChatMessage) -> Unit,
+) {
     val colorScheme = MaterialTheme.colorScheme
     var expanded by rememberSaveable(
         group.key,
@@ -593,6 +816,9 @@ private fun WorkGroupCard(group: TimelineEntry.WorkGroup, level: WorkStepDisplay
     }
     val summary = remember(group.items, group.closed) { summarizeWork(group.items) }
     val live = !group.closed
+    // 展开后正文限高：对齐 DSH 的 min(400px, 50vh)，超长时卡片内部滚动、标题保持可见。
+    val bodyMaxHeight = workStepBodyMaxHeight(LocalConfiguration.current.screenHeightDp)
+    val bodyScroll = rememberScrollState()
 
     Column(
         modifier = Modifier
@@ -626,9 +852,6 @@ private fun WorkGroupCard(group: TimelineEntry.WorkGroup, level: WorkStepDisplay
         }
 
         if (expanded) {
-            // 展开后正文限高：对齐 DSH 的 min(400px, 50vh)，超长时卡片内部滚动、标题保持可见。
-            val bodyMaxHeight = workStepBodyMaxHeight(LocalConfiguration.current.screenHeightDp)
-            val bodyScroll = rememberScrollState()
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -638,7 +861,14 @@ private fun WorkGroupCard(group: TimelineEntry.WorkGroup, level: WorkStepDisplay
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 group.items.forEach { item ->
-                    WorkItem(item, level, live)
+                    WorkItem(
+                        message = item,
+                        level = level,
+                        live = live,
+                        translationEnabled = translationEnabled,
+                        translations = translations,
+                        onTranslate = onTranslate,
+                    )
                 }
             }
         }
@@ -780,9 +1010,23 @@ private fun workStepDoneLabelRes(activity: WorkActivity): Int = when (activity) 
 }
 
 @Composable
-private fun WorkItem(message: ChatMessage, level: WorkStepDisplay, live: Boolean) {
+private fun WorkItem(
+    message: ChatMessage,
+    level: WorkStepDisplay,
+    live: Boolean,
+    translationEnabled: Boolean,
+    translations: Map<String, ThinkingTranslation>,
+    onTranslate: (ChatMessage) -> Unit,
+) {
     when (message.role) {
-        ChatRole.THINKING -> ThinkingRow(message, level, capsBody = false)
+        ChatRole.THINKING -> ThinkingRow(
+            message = message,
+            level = level,
+            translationEnabled = translationEnabled,
+            translation = translations[message.id],
+            onTranslate = onTranslate,
+            capsBody = false,
+        )
         ChatRole.TOOL -> ToolStepRow(message, level, live, capsBody = false)
         // 中间说明：工作过程里的 assistant 文字，弱化显示。
         else -> {
