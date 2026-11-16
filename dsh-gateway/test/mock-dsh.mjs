@@ -100,6 +100,8 @@ export const RPC_WIRE = Object.freeze({
   'permissionPresets/catalog': { keys: [] },
   // `commands/execute` is a flat descriptor: scope `agentId` + two json args.
   'commands/execute': { keys: ['agentId', 'line', 'submittedAttachments'], flat: true },
+  // `agentTeams/setEnabled` is flat too: `agentId` scope + one boolean arg.
+  'agentTeams/setEnabled': { keys: ['agentId', 'enabled'], flat: true },
   '$events/result': { keys: ['clientId', 'eventId', 'outcome'], flat: true },
 })
 
@@ -1046,6 +1048,9 @@ export class MockDsh {
         return deepClone(this.permissionCatalog)
       case 'commands/execute':
         return this._executeCommand(request)
+      case 'agentTeams/setEnabled':
+        // The real host answers void: success is the absence of an error.
+        return undefined
       case '$events/result':
         return this._acceptEventResult(parsed.flat, call)
       default:

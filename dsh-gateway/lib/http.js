@@ -126,6 +126,7 @@ const ROUTES = [
   ['POST', /^\/v1\/sessions\/([^/]+)\/interrupt$/, 'sessionInterrupt'],
   ['POST', /^\/v1\/sessions\/([^/]+)\/model$/, 'sessionModel'],
   ['POST', /^\/v1\/sessions\/([^/]+)\/permission$/, 'sessionPermission'],
+  ['POST', /^\/v1\/sessions\/([^/]+)\/team$/, 'sessionTeam'],
   ['GET', /^\/v1\/models$/, 'models'],
   ['GET', /^\/v1\/permissions$/, 'permissions'],
   ['GET', /^\/v1\/interventions$/, 'interventions'],
@@ -1385,6 +1386,30 @@ export class ApiServer {
       preset,
       result: { kind: typeof result.kind === 'string' ? result.kind : 'success', text },
     })
+  }
+
+  /**
+   * Toggle one session's agent-team mode.
+   *
+   * The switch is a strict flat DSH call (`agentTeams/setEnabled`) that answers
+   * nothing: success is "the host did not reject it", so the body echoes the
+   * requested state rather than a host value. Any failure is a 502 because the
+   * link may be down; the device retries once it is back.
+   */
+  async hSessionTeam({ req, res, params }) {
+    const sessionId = decodeSegment(params[0])
+    const body = await readJsonBody(req, BODY_LIMIT)
+    if (typeof body.enabled !== 'boolean') {
+      throw new HttpError(400, 'invalid_request', 'enabled must be a boolean')
+    }
+    const enabled = body.enabled
+    try {
+      await this.#dsh().call('agentTeams/setEnabled', { agentId: sessionId, enabled })
+    } catch (error) {
+      this.logger.warn?.('agentTeams/setEnabled failed: ' + (error?.code ?? error?.message ?? error))
+      throw new HttpError(502, 'dsh_unavailable', 'DSH could not save the team mode')
+    }
+    writeJson(res, 200, { ok: true, sessionId, enabled })
   }
 
   hInterventions({ res, url }) {
