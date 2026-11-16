@@ -22,9 +22,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -218,6 +220,8 @@ fun ComposerModelChip(
 @Composable
 fun ComposerMenuCard(
     modifier: Modifier = Modifier,
+    /** 内容超出可用高度时是否在卡片内滚动（气泡等小窗口场景）。 */
+    scrollable: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val colorScheme = MaterialTheme.colorScheme
@@ -231,7 +235,19 @@ fun ComposerMenuCard(
         shadowElevation = 18.dp,
     ) {
         Column(
-            modifier = Modifier.padding(vertical = 8.dp),
+            modifier = Modifier
+                .padding(vertical = 8.dp)
+                .then(
+                    if (scrollable) {
+                        // 小窗口（如气泡）里菜单会超出可用高度：限高 + 内部滚动，
+                        // 避免内容被卡片裁掉、只剩半截。普通窗口内容不超高时行为不变。
+                        Modifier
+                            .heightIn(max = 400.dp)
+                            .verticalScroll(rememberScrollState())
+                    } else {
+                        Modifier
+                    },
+                ),
             content = content,
         )
     }
@@ -346,7 +362,8 @@ fun ComposerModelMenu(
     modifier: Modifier = Modifier,
 ) {
     val colorScheme = MaterialTheme.colorScheme
-    ComposerMenuCard(modifier = modifier) {
+    // 智能 / 模型 / 团队三块加起来较高，气泡等小窗口里必须能滚动。
+    ComposerMenuCard(modifier = modifier, scrollable = true) {
         if (effortOptions.isNotEmpty()) {
             Text(
                 text = stringResource(R.string.composer_intelligence),
