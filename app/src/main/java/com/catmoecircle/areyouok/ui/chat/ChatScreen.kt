@@ -70,6 +70,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
@@ -145,6 +146,7 @@ import com.catmoecircle.areyouok.ui.settings.WorkStepFoldedReplies
 import com.catmoecircle.areyouok.ui.theme.AreYouOKTheme
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.blur.BlendColorEntry
 import top.yukonga.miuix.kmp.blur.BlurDefaults
 import top.yukonga.miuix.kmp.blur.LayerBackdrop
@@ -152,6 +154,8 @@ import top.yukonga.miuix.kmp.blur.ProgressiveBlur
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.blur.progressiveTextureBlur
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Back
 
 /** 输入框胶囊高度，聚焦前后保持一致。 */
 private val ComposerHeight = 50.dp
@@ -1672,7 +1676,7 @@ private class ComposerActionAlignment(
     )
 }
 
-/** 胶囊右侧的发送/停止按钮：绿色向上箭头 / 红色方块。 */
+/** 胶囊右侧的发送/停止按钮：主题色 Back 图标 / 红色方块。 */
 @Composable
 private fun ComposerActionButton(
     running: Boolean,
@@ -1717,12 +1721,24 @@ private fun ComposerActionButton(
             .semantics { contentDescription = label },
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = if (stopping) "■" else "↑",
-            color = if (active) Color.White else colorScheme.onSurfaceVariant,
-            fontSize = if (stopping) 12.sp else 17.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
+        if (stopping) {
+            Text(
+                text = "■",
+                color = if (active) Color.White else colorScheme.onSurfaceVariant,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        } else {
+            // 发送键：Miuix 的 Back 图标（返回箭头）顺时针旋转 90° 变成向上箭头，即发送样式。
+            Icon(
+                imageVector = MiuixIcons.Regular.Back,
+                contentDescription = null,
+                tint = if (active) Color.White else colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .size(18.dp)
+                    .rotate(90f),
+            )
+        }
     }
 }
 
