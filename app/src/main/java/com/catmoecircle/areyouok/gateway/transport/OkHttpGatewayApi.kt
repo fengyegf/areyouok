@@ -21,6 +21,8 @@ import com.catmoecircle.areyouok.gateway.protocol.PermissionResult
 import com.catmoecircle.areyouok.gateway.protocol.SelectModelRequest
 import com.catmoecircle.areyouok.gateway.protocol.SelectPermissionRequest
 import com.catmoecircle.areyouok.gateway.protocol.SendMessageRequest
+import com.catmoecircle.areyouok.gateway.protocol.SetTeamEnabledRequest
+import com.catmoecircle.areyouok.gateway.protocol.SetTeamEnabledResponse
 import com.catmoecircle.areyouok.gateway.protocol.TranslateRequest
 import com.catmoecircle.areyouok.gateway.protocol.TranslateResponse
 import com.catmoecircle.areyouok.gateway.protocol.TranslationProvidersResponse
@@ -258,6 +260,29 @@ class OkHttpGatewayApi(
         val result = decodeOrThrow<PermissionResult>(text)
         throwIfNotOk(result.ok, text, "权限切换失败")
         return result
+    }
+
+    override suspend fun setTeamEnabled(
+        sessionId: String,
+        enabled: Boolean,
+    ): SetTeamEnabledResponse {
+        val body = SetTeamEnabledRequest(enabled = enabled)
+        val text = post(
+            "/sessions/${pathSegment(sessionId)}/team",
+            json.encodeToString(SetTeamEnabledRequest.serializer(), body),
+        )
+        val response = decodeOrThrow<SetTeamEnabledResponse>(text)
+        // 失败信封（HTTP 200 + ok:false）沿用统一错误体系。
+        throwIfNotOk(response.ok, text, "切换智能体团队协作失败")
+        // 契约要求回显与请求一致：不一致说明网关没真正生效，不能当成功。
+        if (response.enabled != enabled) {
+            throw GatewayException(
+                GatewayException.CODE_INVALID_REQUEST,
+                0,
+                "切换智能体团队协作失败：网关回显 enabled=${response.enabled}（请求 $enabled）",
+            )
+        }
+        return response
     }
 
     override suspend fun interventions(status: String): List<Intervention> {

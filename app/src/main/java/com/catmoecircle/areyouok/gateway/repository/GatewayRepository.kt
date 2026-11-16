@@ -24,6 +24,7 @@ import com.catmoecircle.areyouok.gateway.protocol.bool
 import com.catmoecircle.areyouok.gateway.protocol.eventKind
 import com.catmoecircle.areyouok.gateway.protocol.long
 import com.catmoecircle.areyouok.gateway.protocol.string
+import com.catmoecircle.areyouok.gateway.protocol.withAgentTeamEnabled
 import com.catmoecircle.areyouok.gateway.protocol.withModelSelection
 import com.catmoecircle.areyouok.gateway.protocol.withPermissionPreset
 import com.catmoecircle.areyouok.gateway.transport.GatewayEndpoint
@@ -1163,6 +1164,34 @@ class GatewayRepository(
             throw cancelled
         } catch (error: Throwable) {
             emitNotice(NoticeLevel.WARN, "切换权限失败：${error.toUserMessage()}")
+            false
+        }
+    }
+
+    /**
+     * 开关当前会话的「智能体团队协作」（DSH `agentTeam` 投影，每根会话一个属性）。
+     *
+     * DSH 官方不做乐观更新；本实现按约定**在 HTTP 成功之后**才更新本地投影，
+     * 避免界面滞后，随后到达的服务端投影会覆盖确认。
+     *
+     * @return 是否已提交给网关；无选中会话或接口失败返回 false。
+     */
+    suspend fun setTeamEnabled(enabled: Boolean): Boolean {
+        val sessionId = _selectedSessionId.value
+        if (sessionId == null) {
+            emitNotice(NoticeLevel.WARN, "请先选择会话")
+            return false
+        }
+        return try {
+            transport.api.setTeamEnabled(sessionId, enabled)
+            _sessions.value = _sessions.value.map {
+                if (it.id == sessionId) it.withAgentTeamEnabled(enabled) else it
+            }
+            true
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            emitNotice(NoticeLevel.WARN, "切换智能体团队协作失败：${error.toUserMessage()}")
             false
         }
     }

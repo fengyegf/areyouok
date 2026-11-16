@@ -577,6 +577,7 @@ fun ChatScreen(modifier: Modifier = Modifier) {
             onSelectPermission = { preset ->
                 scope.launch { repository.selectPermission(preset) }
             },
+            onSetTeamEnabled = { enabled -> repository.setTeamEnabled(enabled) },
             bubbleEnabled = bubbleEnabled,
             bubblesAllowed = bubblesAllowed,
             onBubbleChange = { enabled ->
@@ -823,6 +824,8 @@ fun ChatScreenContent(
     onAnswerQuestion: (eventId: String, answers: List<QuestionAnswer>) -> Unit,
     onSelectModel: (provider: String, model: String, effort: String?) -> Unit = { _, _, _ -> },
     onSelectPermission: (preset: String) -> Unit = {},
+    /** 开关「智能体团队协作」；返回是否已提交给网关（HTTP 成功后才更新本地投影）。 */
+    onSetTeamEnabled: suspend (enabled: Boolean) -> Boolean = { false },
     discoveredGateways: List<DiscoveredGateway> = emptyList(),
     onSelectGateway: (DiscoveredGateway) -> Unit = {},
     onNewSessionInProject: (workspaceId: String?) -> Unit = {},
@@ -896,6 +899,20 @@ fun ChatScreenContent(
     val composerToolsReady = state.connection.phase == ConnectionPhase.CONNECTED &&
         state.selectedSession != null
 
+    // ---- 智能体团队协作（DSH `agentTeam` 投影；只有根会话才有这个键） ------------
+    val teamEnabled = state.selectedSession?.projections?.values?.agentTeam?.enabled
+    // 与桌面端一致：子代理会话、或投影尚未到达（旧网关没有 agentTeam 键）时整行都不渲染，
+    // 避免留下一个永远禁用的开关。
+    val teamVisible = state.selectedSession?.isSubagent != true && teamEnabled != null
+    // 会话运行中时 DSH 不接受改团队开关。
+    val teamLocked = state.running
+    // 已经跑过 turn（有 lastUsed）的会话：停用前先弹确认，说明对协作/开销的影响。
+    val teamSessionStarted =
+        state.selectedSession?.projections?.values?.modelSelection?.lastUsed != null
+    var teamPending by remember { mutableStateOf(false) }
+    var pendingTeamDisable by remember { mutableStateOf(false) }
+    var teamInfoOpen by remember { mutableStateOf(false) }
+
     var composerMenu by remember { mutableStateOf(ComposerMenu.NONE) }
     // 运行中发第二条消息时的「立即发送 / 回答完成后追加」菜单；点空白处收起。
     var sendMenuOpen by remember { mutableStateOf(false) }
@@ -915,11 +932,39 @@ fun ChatScreenContent(
         }
     }
 
+    /**
+     * 团队开关：
+     * - 开启直接下发；
+     * - 关闭时如果这一轮对话已经跑过（有 lastUsed），先收起键盘/菜单并弹确认，
+     *   由用户在说明影响后再决定。
+     * 开关的视觉状态只由 `teamEnabled`（服务端投影 / HTTP 成功后的本地投影）决定，
+     * 这里不做本地乐观切换。
+     */
+    fun toggleTeam(enabled: Boolean) {
+        if (!enabled && teamSessionStarted) {
+            focusManager.clearFocus()
+            composerMenu = ComposerMenu.NONE
+            pendingTeamDisable = true
+            return
+        }
+        menuScope.launch {
+            teamPending = true
+            try {
+                onSetTeamEnabled(enabled)
+            } finally {
+                teamPending = false
+            }
+        }
+    }
+
     // 切换会话时收起浮层，避免在 A 会话里改到 B 会话的值。
     LaunchedEffect(state.selectedSessionId) {
         composerMenu = ComposerMenu.NONE
         pendingFullAccess = null
         sendMenuOpen = false
+        // 团队相关的浮层也属于「当前会话」，切会话时一并收起，避免把 A 的确认发到 B。
+        pendingTeamDisable = false
+        teamInfoOpen = false
     }
 
     // 草稿发出去（或清空）后菜单没有意义了，自动收起。
@@ -1091,6 +1136,17 @@ fun ChatScreenContent(
                                 }
                             },
                             onOpenModelPicker = { composerMenu = ComposerMenu.MODEL_PICKER },
+                            teamVisible = teamVisible,
+                            teamEnabled = teamEnabled,
+                            teamLocked = teamLocked,
+                            teamPending = teamPending,
+                            onToggleTeam = { enabled -> toggleTeam(enabled) },
+                            onShowTeamInfo = {
+                                // 和「完全权限」确认一样先收键盘，弹窗才不会被输入法压住。
+                                focusManager.clearFocus()
+                                composerMenu = ComposerMenu.NONE
+                                teamInfoOpen = true
+                            },
                         )
                     }
 
@@ -1137,6 +1193,22 @@ fun ChatScreenContent(
                     pendingFullAccess = null
                     composerMenu = ComposerMenu.NONE
                     onSelectPermission(option.value)
+                },
+            )
+        }
+
+        // 团队行的 ⓘ：「关于智能体团队协作」说明。
+        if (teamInfoOpen) {
+            ComposerTeamInfoDialog(onDismiss = { teamInfoOpen = false })
+        }
+
+        // 停用团队协作前的确认（对话已经跑过时才走这里）。
+        if (pendingTeamDisable) {
+            ComposerTeamDisableDialog(
+                onDismiss = { pendingTeamDisable = false },
+                onConfirm = {
+                    pendingTeamDisable = false
+                    menuScope.launch { onSetTeamEnabled(false) }
                 },
             )
         }

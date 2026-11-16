@@ -168,6 +168,55 @@ class OkHttpGatewayApiTest {
         assertTrue("unexpected body: $body", body.contains("\"reasoningEffort\":\"max\""))
     }
 
+    @Test
+    fun `set team enabled posts the flag and decodes the echo`() = runTest {
+        val requests = mutableListOf<Request>()
+        val api = apiReturning(
+            200,
+            """{"ok":true,"sessionId":"s1","enabled":true}""",
+            requests,
+        )
+
+        val result = api.setTeamEnabled("s1", true)
+
+        assertEquals("/v1/sessions/s1/team", requests.single().url.encodedPath)
+        val body = requests.single().bodyText()
+        assertTrue("unexpected body: $body", body.contains("\"enabled\":true"))
+        assertTrue("expected ok", result.ok)
+        assertEquals("s1", result.sessionId)
+        assertEquals(true, result.enabled)
+    }
+
+    @Test
+    fun `set team enabled rejects an echo that differs from the request`() = runTest {
+        // 网关回显与请求不一致 = 开关没真正生效，不能当成功。
+        val api = apiReturning(200, """{"ok":true,"sessionId":"s1","enabled":false}""")
+
+        val error = runCatching { api.setTeamEnabled("s1", true) }.exceptionOrNull()
+
+        assertTrue("expected GatewayException, got $error", error is GatewayException)
+        error as GatewayException
+        assertTrue(
+            "unexpected message: ${error.message}",
+            error.message.orEmpty().contains("enabled"),
+        )
+    }
+
+    @Test
+    fun `set team disabled surfaces 502 dsh unavailable envelope`() = runTest {
+        val api = apiReturning(
+            502,
+            """{"ok":false,"error":{"code":"dsh_unavailable","message":"dsh is not running"}}""",
+        )
+
+        val error = runCatching { api.setTeamEnabled("s1", false) }.exceptionOrNull()
+
+        assertTrue("expected GatewayException, got $error", error is GatewayException)
+        error as GatewayException
+        assertEquals(GatewayException.CODE_DSH_UNAVAILABLE, error.code)
+        assertEquals("dsh is not running", error.message)
+    }
+
     companion object {
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 

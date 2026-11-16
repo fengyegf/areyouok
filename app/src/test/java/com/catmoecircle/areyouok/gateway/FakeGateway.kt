@@ -10,6 +10,7 @@ import com.catmoecircle.areyouok.gateway.protocol.OkResponse
 import com.catmoecircle.areyouok.gateway.protocol.PairResponse
 import com.catmoecircle.areyouok.gateway.protocol.PermissionCatalog
 import com.catmoecircle.areyouok.gateway.protocol.PermissionResult
+import com.catmoecircle.areyouok.gateway.protocol.SetTeamEnabledResponse
 import com.catmoecircle.areyouok.gateway.protocol.SessionState
 import com.catmoecircle.areyouok.gateway.protocol.SessionSummary
 import com.catmoecircle.areyouok.gateway.protocol.Topics
@@ -44,6 +45,7 @@ class FakeGatewayApi : GatewayApi {
     var permissionCatalog = PermissionCatalog()
     var selectModelResponse = OkResponse(ok = true)
     var selectPermissionResult = PermissionResult(ok = true)
+    var setTeamEnabledResponse = SetTeamEnabledResponse(ok = true, enabled = null)
     var eventsPage = EventsPage(events = emptyList())
     var createSessionResponse = CreateSessionResponse(ok = true, sessionId = "s-new")
     var pairResponse = PairResponse(ok = true, deviceToken = "tok-123")
@@ -100,6 +102,8 @@ class FakeGatewayApi : GatewayApi {
     val selectedModels = mutableListOf<SelectedModel>()
     /** 每次 `POST /v1/sessions/{id}/permission` 的入参：(sessionId, preset)。 */
     val selectedPermissions = mutableListOf<Pair<String, String>>()
+    /** 每次 `POST /v1/sessions/{id}/team` 的入参：(sessionId, enabled)。 */
+    val teamRequests = mutableListOf<Pair<String, Boolean>>()
 
     override suspend fun health(): HealthResponse {
         maybeThrow()
@@ -184,6 +188,21 @@ class FakeGatewayApi : GatewayApi {
         maybeThrow()
         selectedPermissions += sessionId to preset
         return selectPermissionResult
+    }
+
+    override suspend fun setTeamEnabled(
+        sessionId: String,
+        enabled: Boolean,
+    ): SetTeamEnabledResponse {
+        maybeThrow()
+        teamRequests += sessionId to enabled
+        // 默认回显请求值：契约要求 `enabled` 与请求一致才算成功；
+        // 测试想模拟「回显不一致」时可以显式设置 setTeamEnabledResponse.enabled。
+        val response = setTeamEnabledResponse
+        return response.copy(
+            sessionId = response.sessionId ?: sessionId,
+            enabled = response.enabled ?: enabled,
+        )
     }
 
     override suspend fun interventions(status: String): List<Intervention> {

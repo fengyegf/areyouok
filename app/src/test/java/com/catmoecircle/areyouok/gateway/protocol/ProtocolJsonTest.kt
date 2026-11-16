@@ -455,6 +455,61 @@ class ProtocolJsonTest {
     }
 
     @Test
+    fun `agent team projection decodes enabled failure and missing key`() {
+        // 根会话才有 agentTeam：{enabled, tasks, failure?}；客户端只用 enabled。
+        val withTeam = GatewayJson.json.decodeFromString<SessionSummary>(
+            """{"sessionId":"session-root","projections":{"kind":"sequenced","asOfSeq":42,"values":{
+                "title":"团队对话",
+                "agentTeam":{"enabled":true,"tasks":[
+                    {"id":"t1","title":"拆分任务","status":"done"}],
+                    "failure":null},
+                "permissions":{"currentValue":"workspace-write"}}}}""",
+        )
+        assertEquals(true, withTeam.teamEnabled)
+        assertEquals(true, withTeam.projections?.values?.agentTeam?.enabled)
+        assertEquals("团队对话", withTeam.displayTitle)
+
+        // failure：DSH 在团队板异常时会带失败原因。
+        val failed = GatewayJson.json.decodeFromString<SessionSummary>(
+            """{"sessionId":"s2","projections":{"values":{"agentTeam":
+                {"enabled":false,"failure":"team board unavailable"}}}}""",
+        )
+        assertEquals(false, failed.teamEnabled)
+        assertEquals("team board unavailable", failed.projections?.values?.agentTeam?.failure)
+
+        // 缺省（子会话没有这个键 / 旧网关）→ null。
+        val missing = GatewayJson.json.decodeFromString<SessionSummary>(
+            """{"sessionId":"session-child","parentSessionId":"session-root","origin":"subagent",
+                "projections":{"values":{"title":"子代理"}}}""",
+        )
+        assertNull(missing.teamEnabled)
+        assertTrue(missing.isSubagent)
+        assertNull(GatewayJson.json.decodeFromString<SessionSummary>("""{"sessionId":"s3"}""").teamEnabled)
+    }
+
+    @Test
+    fun `with agent team enabled keeps other projection fields`() {
+        val summary = GatewayJson.json.decodeFromString<SessionSummary>(
+            """{"sessionId":"s1","projections":{"kind":"sequenced","asOfSeq":7,"values":{
+                "title":"标题",
+                "modelSelection":{"lastUsed":{"provider":"p","model":"m"}},
+                "permissions":{"currentValue":"read-only"},
+                "agentTeam":{"enabled":false,"failure":"stale"}}}}""",
+        )
+        val updated = summary.withAgentTeamEnabled(true)
+        assertEquals(true, updated.teamEnabled)
+        // failure 与其它投影字段原样保留。
+        assertEquals("stale", updated.projections?.values?.agentTeam?.failure)
+        assertEquals("m", updated.modelSelection?.model)
+        assertEquals("read-only", updated.permissionPreset)
+        assertEquals("标题", updated.displayTitle)
+        assertEquals(7L, updated.projections?.asOfSeq)
+
+        // 完全没有 projections 的旧网关：新建一个，只带 agentTeam。
+        assertEquals(true, SessionSummary(id = "s9").withAgentTeamEnabled(true).teamEnabled)
+    }
+
+    @Test
     fun `pair and create session responses`() {
         val pair = GatewayJson.json.decodeFromString<PairResponse>(
             """{"ok":true,"deviceToken":"t","deviceId":"d","expiresAt":null}""",

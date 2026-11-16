@@ -15,6 +15,7 @@ import com.catmoecircle.areyouok.gateway.protocol.PermissionCatalog
 import com.catmoecircle.areyouok.gateway.protocol.PermissionOption
 import com.catmoecircle.areyouok.gateway.protocol.QuestionAnswer
 import com.catmoecircle.areyouok.gateway.protocol.ReasoningEffort
+import com.catmoecircle.areyouok.gateway.protocol.SessionAgentTeam
 import com.catmoecircle.areyouok.gateway.protocol.SessionModelSelection
 import com.catmoecircle.areyouok.gateway.protocol.SessionPermissions
 import com.catmoecircle.areyouok.gateway.protocol.SessionProjectionValues
@@ -1034,6 +1035,17 @@ class GatewayRepositoryTest {
         ),
     )
 
+    /** 带 `agentTeam` 投影的根会话（团队开关默认开启）。 */
+    private fun sessionWithAgentTeam(enabled: Boolean = true): SessionSummary {
+        val base = sessionWithProjection()
+        val values = base.projections?.values ?: SessionProjectionValues()
+        return base.copy(
+            projections = (base.projections ?: SessionProjections()).copy(
+                values = values.copy(agentTeam = SessionAgentTeam(enabled = enabled)),
+            ),
+        )
+    }
+
     /** 在后台收集 notices（SharedFlow 没有 replay，必须在动作前开始收集）。 */
     private fun TestScope.watchNotices(repository: GatewayRepository): List<GatewayNotice> {
         val notices = mutableListOf<GatewayNotice>()
@@ -1218,6 +1230,62 @@ class GatewayRepositoryTest {
         advanceUntilIdle()
         assertEquals("workspace-write", repository.sessions.value.single().permissionPreset)
         assertTrue(notices.any { it.level == NoticeLevel.WARN && it.text.contains("切换权限失败") })
+        testScope.cancel()
+    }
+
+    @Test
+    fun `set team enabled updates agentTeam projection after the gateway accepts`() = runTest {
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(sessionWithAgentTeam(enabled = true))
+            fakeApi.modelCatalog = catalog()
+        }
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope)
+        repository.connect(endpoint)
+        advanceUntilIdle()
+        assertEquals(true, repository.sessions.value.single().teamEnabled)
+
+        val ok = repository.setTeamEnabled(false)
+        advanceUntilIdle()
+
+        assertTrue(ok)
+        assertEquals("s1" to false, transport.fakeApi.teamRequests.single())
+        val session = repository.sessions.value.single()
+        // HTTP 成功后才更新本地投影；其它投影字段（模型/权限/标题）原样保留。
+        assertEquals(false, session.teamEnabled)
+        assertEquals("high", session.modelSelection?.reasoningEffort)
+        assertEquals("workspace-write", session.permissionPreset)
+        assertEquals("会话一", session.displayTitle)
+        testScope.cancel()
+    }
+
+    @Test
+    fun `set team enabled without session or on failure keeps projection`() = runTest {
+        val transport = FakeTransport().apply { fakeApi.sessions = emptyList() }
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope)
+        repository.connect(endpoint)
+        advanceUntilIdle()
+        val notices = watchNotices(repository)
+
+        assertFalse(repository.setTeamEnabled(true))
+        advanceUntilIdle()
+        assertTrue(transport.fakeApi.teamRequests.isEmpty())
+        assertTrue(notices.any { it.level == NoticeLevel.WARN && it.text.contains("请先选择会话") })
+
+        // 选中会话后模拟网关失败：本地投影保持原值，并给出 WARN。
+        transport.fakeApi.sessions = listOf(sessionWithAgentTeam(enabled = true))
+        repository.refresh()
+        advanceUntilIdle()
+        transport.fakeApi.error = GatewayException("dsh_unavailable", 502, "dsh down")
+        assertFalse(repository.setTeamEnabled(false))
+        advanceUntilIdle()
+        // FakeGatewayApi 在记录入参前就抛错（与 selectModel/selectPermission 一致）。
+        assertTrue(transport.fakeApi.teamRequests.isEmpty())
+        assertEquals(true, repository.sessions.value.single().teamEnabled)
+        assertTrue(
+            notices.any { it.level == NoticeLevel.WARN && it.text.contains("切换智能体团队协作失败") },
+        )
         testScope.cancel()
     }
 

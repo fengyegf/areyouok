@@ -30,6 +30,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -57,6 +58,7 @@ import com.catmoecircle.areyouok.R
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.ChevronForward
 import top.yukonga.miuix.kmp.icon.extended.ExpandLess
+import top.yukonga.miuix.kmp.icon.extended.Info
 import top.yukonga.miuix.kmp.icon.extended.Lock
 import top.yukonga.miuix.kmp.icon.extended.Ok
 import top.yukonga.miuix.kmp.icon.extended.Search
@@ -331,6 +333,16 @@ fun ComposerModelMenu(
     currentEffort: String?,
     onSelectEffort: (String) -> Unit,
     onOpenModelPicker: () -> Unit,
+    /** 是否展示「智能体团队协作」开关行（子代理会话不展示）。 */
+    teamVisible: Boolean = false,
+    /** 当前会话投影里的开关值；null 表示未知（禁用开关）。 */
+    teamEnabled: Boolean? = null,
+    /** 会话运行中：DSH 不允许中途改团队开关。 */
+    teamLocked: Boolean = false,
+    /** 请求进行中：避免连点。 */
+    teamPending: Boolean = false,
+    onToggleTeam: (Boolean) -> Unit = {},
+    onShowTeamInfo: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val colorScheme = MaterialTheme.colorScheme
@@ -385,6 +397,58 @@ fun ComposerModelMenu(
                 tint = colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(18.dp),
             )
+        }
+        if (teamVisible) {
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 6.dp),
+                color = colorScheme.outline.copy(alpha = 0.16f),
+            )
+            val teamSwitchEnabled = teamEnabled != null && !teamPending && !teamLocked
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    // 与桌面端一致：整行可点切换；ⓘ 有自己的 clickable，会先消费点击。
+                    .clickable(enabled = teamSwitchEnabled, role = Role.Button) {
+                        onToggleTeam(teamEnabled != true)
+                    }
+                    .padding(start = 18.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = stringResource(R.string.composer_team_label),
+                        color = if (teamSwitchEnabled) colorScheme.onSurface
+                        else colorScheme.onSurfaceVariant,
+                        fontSize = 15.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    // 说明入口：点 ⓘ 弹「关于智能体团队协作」，不切换开关。
+                    Box(
+                        modifier = Modifier
+                            .size(20.dp)
+                            .clip(CircleShape)
+                            .clickable(role = Role.Button, onClick = onShowTeamInfo),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = MiuixIcons.Regular.Info,
+                            contentDescription = stringResource(R.string.composer_team_info),
+                            tint = colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
+                }
+                Switch(
+                    checked = teamEnabled == true,
+                    onCheckedChange = { onToggleTeam(it) },
+                    enabled = teamSwitchEnabled,
+                )
+            }
         }
     }
 }
@@ -628,6 +692,165 @@ fun FullAccessConfirmDialog(
                     ) {
                         Text(
                             text = stringResource(R.string.composer_full_access_confirm),
+                            color = colorScheme.surface,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 「关于智能体团队协作」说明弹窗（团队行 ⓘ 入口）。
+ *
+ * 文案取官方说明：共享任务板协调多个智能体的分工与进度，复杂任务表现更佳，token 开销更高。
+ */
+@Composable
+fun ComposerTeamInfoDialog(onDismiss: () -> Unit) {
+    val colorScheme = MaterialTheme.colorScheme
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(26.dp),
+            color = colorScheme.surface,
+            contentColor = colorScheme.onSurface,
+            shadowElevation = 24.dp,
+        ) {
+            Column(modifier = Modifier.padding(22.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = stringResource(R.string.composer_team_info_title),
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .clickable(role = Role.Button, onClick = onDismiss),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "×",
+                            color = colorScheme.onSurfaceVariant,
+                            fontSize = 20.sp,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    text = stringResource(R.string.composer_team_info_body),
+                    color = colorScheme.onSurface,
+                    fontSize = 14.sp,
+                    lineHeight = 21.sp,
+                )
+                Spacer(Modifier.height(18.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .height(40.dp)
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(colorScheme.onSurface)
+                            .clickable(role = Role.Button, onClick = onDismiss)
+                            .padding(horizontal = 20.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = stringResource(R.string.composer_team_info_ok),
+                            color = colorScheme.surface,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 停用「智能体团队协作」的确认弹窗。
+ *
+ * 对话已经跑过（`modelSelection.lastUsed` 非空）时先弹这个，说明停用会断开共享任务板、
+ * 影响缓存复用与后续 token 开销；用户确认后才真正下发 `enabled=false`。
+ */
+@Composable
+fun ComposerTeamDisableDialog(
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(26.dp),
+            color = colorScheme.surface,
+            contentColor = colorScheme.onSurface,
+            shadowElevation = 24.dp,
+        ) {
+            Column(modifier = Modifier.padding(22.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = stringResource(R.string.composer_team_disable_title),
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .clickable(role = Role.Button, onClick = onDismiss),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "×",
+                            color = colorScheme.onSurfaceVariant,
+                            fontSize = 20.sp,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    text = stringResource(R.string.composer_team_disable_desc),
+                    color = colorScheme.onSurface,
+                    fontSize = 14.sp,
+                    lineHeight = 21.sp,
+                )
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    text = stringResource(R.string.composer_team_disable_warning),
+                    color = colorScheme.onSurfaceVariant,
+                    fontSize = 14.sp,
+                    lineHeight = 21.sp,
+                )
+                Spacer(Modifier.height(18.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = onDismiss) {
+                        Text(stringResource(R.string.composer_cancel))
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .height(40.dp)
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(colorScheme.onSurface)
+                            .clickable(role = Role.Button, onClick = onConfirm)
+                            .padding(horizontal = 20.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = stringResource(R.string.composer_team_disable_confirm),
                             color = colorScheme.surface,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Medium,

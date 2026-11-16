@@ -219,6 +219,17 @@
     <string name="composer_full_access_confirm">启用完全权限</string>
     <string name="composer_cancel">取消</string>
 
+    <!-- 输入框：智能体团队协作（DSH agentTeam 投影） -->
+    <string name="composer_team_label">启用智能体团队协作</string>
+    <string name="composer_team_info">关于智能体团队协作</string>
+    <string name="composer_team_info_title">关于智能体团队协作</string>
+    <string name="composer_team_info_body">通过共享任务板协调多个智能体的分工与进度，复杂任务表现更佳，token 开销也相应更高。</string>
+    <string name="composer_team_disable_title">确认停用智能体团队协作？</string>
+    <string name="composer_team_disable_desc">对话过程中停用智能体团队协作，将停止共享任务工具和团队协调指令。</string>
+    <string name="composer_team_disable_warning">停用后可能影响缓存复用、增加后续 token 用量与开销，并影响当前任务的协作效果。</string>
+    <string name="composer_team_disable_confirm">确认停用</string>
+    <string name="composer_team_info_ok">知道了</string>
+
     <!-- 通知气泡（系统气泡通知，不使用悬浮窗权限） -->
     <string name="settings_bubbles_section">通知气泡</string>
     <string name="settings_bubbles_enabled_title">气泡提醒</string>

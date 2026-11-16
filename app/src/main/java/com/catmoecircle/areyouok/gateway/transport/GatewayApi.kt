@@ -10,6 +10,7 @@ import com.catmoecircle.areyouok.gateway.protocol.OkResponse
 import com.catmoecircle.areyouok.gateway.protocol.PairResponse
 import com.catmoecircle.areyouok.gateway.protocol.PermissionCatalog
 import com.catmoecircle.areyouok.gateway.protocol.PermissionResult
+import com.catmoecircle.areyouok.gateway.protocol.SetTeamEnabledResponse
 import com.catmoecircle.areyouok.gateway.protocol.SessionState
 import com.catmoecircle.areyouok.gateway.protocol.SessionSummary
 import com.catmoecircle.areyouok.gateway.protocol.TranslateResponse
@@ -141,6 +142,14 @@ interface GatewayApi {
 
     /** POST /v1/sessions/{id}/permission：切换会话的沙箱权限预设。 */
     suspend fun selectPermission(sessionId: String, preset: String): PermissionResult
+
+    /**
+     * POST /v1/sessions/{id}/team：开关根会话的「智能体团队协作」（DSH `agentTeam`）。
+     *
+     * 开关是每根会话的属性；关闭后 DSH 保留已有任务与子代理。
+     * 实现必须校验响应里的 `enabled` 与请求一致，否则抛 [GatewayException]。
+     */
+    suspend fun setTeamEnabled(sessionId: String, enabled: Boolean): SetTeamEnabledResponse
 
     suspend fun interventions(status: String = "pending"): List<Intervention>
 

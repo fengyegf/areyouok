@@ -132,6 +132,10 @@ data class SessionSummary(
     /** 当前会话的权限预设（如 `danger-full-access`）；没有投影时为 null。 */
     val permissionPreset: String?
         get() = projections?.values?.permissions?.currentValue?.takeIf { it.isNotBlank() }
+
+    /** 当前会话的「智能体团队协作」开关；没有 `agentTeam` 投影（含子会话）时为 null。 */
+    val teamEnabled: Boolean?
+        get() = projections?.values?.agentTeam?.enabled
 }
 
 /** DSH 会话投影（只取 UI 需要的字段，其余忽略）。 */
@@ -156,6 +160,12 @@ data class SessionProjectionValues(
     val modelSelection: SessionModelSelection? = null,
     /** 权限投影：`{"currentValue":"danger-full-access"}`。 */
     val permissions: SessionPermissions? = null,
+    /**
+     * 智能体团队协作投影（DSH `agentTeam`）：`{"enabled":bool,"tasks":[…],"failure?":String}`。
+     *
+     * 只有根会话才有这个键；子代理会话没有（UI 在子会话里不渲染团队开关）。
+     */
+    val agentTeam: SessionAgentTeam? = null,
 )
 
 /** DSH `sessionListMetadata` 投影：`blank` 为列表侧的空白标记。 */
@@ -180,6 +190,19 @@ data class SessionModelSelection(
 @Serializable
 data class SessionPermissions(
     val currentValue: String = "",
+)
+
+/**
+ * DSH `agentTeam` 投影：根会话的「智能体团队协作」开关状态。
+ *
+ * 来自 DSH 0.2.2-rc 的 `session.projections.values.agentTeam`，形状
+ * `{enabled: Boolean, tasks: [...], failure?: String}`。客户端只需要 [enabled]，
+ * 任务板内容与 [failure] 只保留字段以便将来展示（当前 UI 不消费）。
+ */
+@Serializable
+data class SessionAgentTeam(
+    val enabled: Boolean = false,
+    val failure: String? = null,
 )
 
 /** GET /v1/sessions/{id}/state：`state` 是 DSH 原样对象，客户端忽略。 */
@@ -757,6 +780,15 @@ fun SessionSummary.withPermissionPreset(preset: String): SessionSummary = copy(
     },
 )
 
+/** 乐观更新：只替换 `projections.values.agentTeam.enabled`，其余字段原样保留。 */
+fun SessionSummary.withAgentTeamEnabled(enabled: Boolean): SessionSummary = copy(
+    projections = projections.withValues { values ->
+        values.copy(
+            agentTeam = (values.agentTeam ?: SessionAgentTeam()).copy(enabled = enabled),
+        )
+    },
+)
+
 private fun SessionProjections?.withValues(
     transform: (SessionProjectionValues) -> SessionProjectionValues,
 ): SessionProjections {
@@ -844,6 +876,20 @@ data class SelectModelRequest(
 @Serializable
 data class SelectPermissionRequest(
     val preset: String,
+)
+
+/** POST /v1/sessions/{id}/team 的请求体（DSH 每根会话一个开关）。 */
+@Serializable
+data class SetTeamEnabledRequest(
+    val enabled: Boolean,
+)
+
+/** POST /v1/sessions/{id}/team 的响应：`{ok,sessionId,enabled}`。 */
+@Serializable
+data class SetTeamEnabledResponse(
+    val ok: Boolean = true,
+    val sessionId: String? = null,
+    val enabled: Boolean? = null,
 )
 
 @Serializable
