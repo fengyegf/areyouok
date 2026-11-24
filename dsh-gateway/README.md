@@ -87,7 +87,8 @@ pnpm install
 | `host` | `0.0.0.0` | 监听地址 |
 | `mdns` | true | 广播 `_dshgw._tcp` |
 | `lanRequirePairing` | false | 局域网是否也要求设备令牌 |
-| `publicUrl` | 空 | 手动指定公网基址（默认自动枚举全局 IPv6） |
+| `publicUrl` | 空 | 手动指定公网基址（默认自动枚举全局 IPv6；代理 TUN / 保留段的虚拟地址不会被广播） |
+| `qrEmbedCertificate` | false | 公网配对二维码是否内嵌整张证书（默认只带 SHA-256 指纹，码更疏、更好扫） |
 | `maxDevices` | 4 | 同时在线设备上限 |
 | `approvalTtlMs` | 1800000 | 待审批在插件侧保留时长 |
 | `ringSize` | 2000 | 事件 ring 条数 |
@@ -139,7 +140,8 @@ WS   /v1/stream                         长连接（hello/sub/ack/ping）
 - `7789`：任何来源都需要设备令牌；HTTPS 自签证书。
 - **配置页二维码可在「局域网 HTTP / 公网 HTTPS」两个版本间切换**：
   - 局域网版 `dshgw://pair?url=http://<ip>:7788&…` 不带证书；APK 在同一网段时不会触碰 TLS，也不需要配对码（`lanRequirePairing=true` 时仍可在 LAN 上走 HTTP 配对换令牌）。
-  - 公网版 `dshgw://pair?mode=pub&pub=https://…&cert=<base64url DER>&fp=<sha256>&…` 把公网地址**和自签证书本体**一起写进二维码；APK 扫码后直接在 App 内固定这张证书（`GatewayTls`/`GatewayPins` + 自定义 `TrustManager`/`HostnameVerifier`），**不需要把证书装进 Android 系统信任库**。二维码因此明显变密，面板会把公网版放大到 290px 显示。
+  - 公网版 `dshgw://pair?mode=pub&pub=https://…&fp=<sha256>&…` 把公网地址**和自签证书的 SHA-256 指纹**写进二维码；APK 扫码后直接在 App 内固定这张证书（`GatewayTls`/`GatewayPins` + 自定义 `TrustManager`/`HostnameVerifier`），**不需要把证书装进 Android 系统信任库**。默认**不再**内嵌 1.4 KB 的证书本体（`cert=`）：那会把二维码从 ~57 模块撑到 ~141 模块，面板里每模块只剩约 2px，手机相机解析不出来；需要整张证书时把 `qrEmbedCertificate` 设为 `true`。
+  - 公网地址只从「手机真的能拨通」的地址里挑：`198.18.0.0/15`（Clash/Mihomo 等代理 TUN 的 fake-ip 段，默认网关 `198.18.0.1`）、`240.0.0.0/4`、`169.254.0.0/16`、Teredo `2001:0::/32`、IPv6 链路本地与文档段一律不广播；全局 IPv6 优先于任何公网 IPv4；上一轮已经广播过的地址优先保留，避免网卡抖动时面板地址自己跳变。
 - 网关的两个监听**不再提供任何管理页面或管理接口**：`/admin` 及其 `/admin/api/*` 已删除，只剩 `/v1`。
 
 ### 思考链翻译（`/v1/translate`）
@@ -249,7 +251,7 @@ curl -s -X POST http://127.0.0.1:7788/v1/translate -H "content-type: application
 页面内容（一页纵向排列，不分标签）：
 
 - **运行状态**：DSH 连接、局域网 HTTP / 公网 HTTPS 端口、mDNS、已配对设备数、已运行时长
-- **扫码配对**：生成一次性 `dshgw://pair?…` 配对码，页内直接画出二维码；顶部可在**局域网 HTTP / 公网 HTTPS**两个版本间切换（公网版额外内嵌自签证书，供 App 直接固定），10 分钟有效
+- **扫码配对**：生成一次性 `dshgw://pair?…` 配对码，页内直接画出二维码；顶部可在**局域网 HTTP / 公网 HTTPS**两个版本间切换（公网版把自签证书的 SHA-256 指纹写进码里，App 扫码时直接固定这张证书），10 分钟有效
 - **已配对设备**：名称、设备 ID、最近来源、最近活跃、撤销
 - **开关**：`lanRequirePairing`、`mdns`（内存生效；`mdns` 需重启）
 
@@ -303,6 +305,7 @@ node test/smoke.mjs                      # 端到端冒烟，成功打印 SMOKE 
 | `test/panel.test.mjs` | 配置页后端：路由表、状态、配对、撤销、开关、405/403、fail-closed |
 | `test/client.test.mjs` | 浏览器半：模块加载契约、槽位注册、语言字典、渲染不崩 |
 | `test/tls.test.mjs` | 自签证书与指纹 |
+| `test/addresses.test.mjs` | 地址枚举：代理 TUN / 保留段过滤、IPv6 优先、稳定排序 |
 
 测试体系说明见 `docs/dsh-gateway-impl-plan.md` §6；DSH 内部协议的事实以 `docs/dsh-internal-api-notes.md` 为准（含运行实例实测，wire args 与交接文档示例不同）。修改代码后需**完全重启 DSH** 生效（HMR 不可靠）。
 
@@ -324,6 +327,8 @@ node tools/install-gateway.mjs --remove --apply  # 卸载
 | 审批不回 | `clientId` 是否最新、`$events/result` 是否 200、eventId 是否已结算 |
 | mDNS 发现不到 | 路由器多播/AP 隔离；用 APK 手输地址兜底 |
 | 手机扫码打不开公网 | 检查 IPv6 前缀/防火墙放行 7789；配置页显示的公网地址是否可达 |
+| 公网地址显示成 `198.18.x.x` / `198.19.x.x` | 这是代理（Clash/Mihomo）TUN 网卡的 fake-ip 段，不是公网地址：旧版把它排在 IPv6 前面写进了二维码。现在这类地址已被过滤，重启 DSH 后应只剩全局 IPv6。手机侧若也开着代理，连 `198.18.*` 会被自己的 TUN 劫持，表现成「TLS 握手失败（证书指纹不匹配？）」——那不是证书问题 |
+| 公网二维码扫不出来 | 旧版公网码内嵌整张证书（~1.4 KB / 141 模块），面板里每模块约 2px，手机很难解析；现在默认只带指纹（~57 模块）。仍扫不动时先确认面板没有被缩得很窄、屏幕亮度足够 |
 | 插件页一直「正在读取…」 | 宿主 `webServer` 未注册到 `/plugins/dsh-gateway/*`：看日志有无 `in-app plugin panel did not mount`；旧版 DSH 缺少 `ctx.webServer.register` 时配置页无后端 |
 | 设置面板里没有「DSH 网关」 | 宿主未声明 `settings.section` 槽（旧版 DSH）；插件仍可从「插件 → 已安装插件」的行配置页进入 |
 | 插件页 403 | 宿主 `connection.requestRejection` 拒绝了请求（Host/Origin 不被信任，或浏览器会话未登录）；同源打开 Web UI 再试 |

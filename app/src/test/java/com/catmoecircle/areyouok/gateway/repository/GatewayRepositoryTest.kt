@@ -1,6 +1,8 @@
 package com.catmoecircle.areyouok.gateway.repository
 
 import com.catmoecircle.areyouok.gateway.FakeTransport
+import com.catmoecircle.areyouok.gateway.protocol.ActivityJob
+import com.catmoecircle.areyouok.gateway.protocol.ActivitySubagent
 import com.catmoecircle.areyouok.gateway.protocol.EventsPage
 import com.catmoecircle.areyouok.gateway.protocol.HealthResponse
 import com.catmoecircle.areyouok.gateway.protocol.Intervention
@@ -22,6 +24,8 @@ import com.catmoecircle.areyouok.gateway.protocol.SessionProjectionValues
 import com.catmoecircle.areyouok.gateway.protocol.SessionProjections
 import com.catmoecircle.areyouok.gateway.protocol.SendMessageRequest
 import com.catmoecircle.areyouok.gateway.protocol.SessionSummary
+import com.catmoecircle.areyouok.gateway.protocol.TeamActivity
+import com.catmoecircle.areyouok.gateway.protocol.TeamTaskBrief
 import com.catmoecircle.areyouok.gateway.protocol.Snapshot
 import com.catmoecircle.areyouok.gateway.protocol.ReadyFrame
 import com.catmoecircle.areyouok.gateway.protocol.Workspace
@@ -1414,6 +1418,310 @@ class GatewayRepositoryTest {
 
         assertEquals(ChatRole.USER, repository.messages.value.last().role)
         assertEquals("不是有实机吗？你用真机调试啊", repository.messages.value.last().text)
+        testScope.cancel()
+    }
+
+    @Test
+    fun `team activity refresh stores activity for the selected session`() = runTest {
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "会话一"))
+            fakeApi.teamActivity = TeamActivity(
+                sessionId = "s1",
+                team = SessionAgentTeam(
+                    enabled = true,
+                    tasks = listOf(TeamTaskBrief(id = "task-1", subject = "实现", status = "in_progress")),
+                ),
+                subagents = listOf(
+                    ActivitySubagent(id = "session-child", title = "gateway-dev", running = true),
+                ),
+                jobs = listOf(
+                    ActivityJob(id = "bash-1", kind = "bash", label = "npm test", status = "running"),
+                ),
+            )
+        }
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope)
+        repository.connect(endpoint)
+        advanceUntilIdle()
+
+        repository.refreshTeamActivity()
+
+        // 用当前选中会话请求活动；结果进 StateFlow，供面板消费。
+        assertEquals(listOf("s1"), transport.fakeApi.teamActivityRequests)
+        val activity = repository.teamActivity.value
+        assertEquals("s1", activity?.sessionId)
+        assertEquals(1, activity?.subagents?.size)
+        assertEquals(1, activity?.runningSubagents)
+        assertEquals(1, activity?.inProgressTasks)
+        assertFalse(repository.teamActivityUnsupported.value)
+        testScope.cancel()
+    }
+
+    @Test
+    fun `team activity refresh without a selected session is a no-op`() = runTest {
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "会话一"))
+        }
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope)
+        repository.connect(endpoint)
+        advanceUntilIdle()
+        repository.selectSession(null)
+
+        repository.refreshTeamActivity()
+
+        assertTrue(transport.fakeApi.teamActivityRequests.isEmpty())
+        assertNull(repository.teamActivity.value)
+        testScope.cancel()
+    }
+
+    @Test
+    fun `team activity failure keeps previous value and warns once`() = runTest {
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "会话一"))
+            fakeApi.teamActivity = TeamActivity(
+                sessionId = "s1",
+                subagents = listOf(ActivitySubagent(id = "c1", title = "dev", running = true)),
+            )
+        }
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope)
+        repository.connect(endpoint)
+        advanceUntilIdle()
+        repository.refreshTeamActivity()
+        assertEquals("s1", repository.teamActivity.value?.sessionId)
+
+        val notices = mutableListOf<String>()
+        testScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            repository.notices.collect { notices += it.text }
+        }
+        advanceUntilIdle()
+
+        transport.fakeApi.teamActivityError = java.io.IOException("boom")
+        repository.refreshTeamActivity()
+        repository.refreshTeamActivity()
+
+        // 失败保留旧值（面板不闪空）；同样的错误连续两次只 WARN 一次，避免 2s 轮询刷 toast。
+        assertEquals("s1", repository.teamActivity.value?.sessionId)
+        assertEquals(1, notices.count { it.startsWith("团队活动刷新失败") })
+        testScope.cancel()
+    }
+
+    @Test
+    fun `legacy gateway unsupported flags panel without touching chat state`() = runTest {
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "会话一"))
+            fakeApi.messagesPage = MessagesPage(messages = listOf(Message(seq = 1, role = "user", text = "hi")))
+            fakeApi.teamActivityError = GatewayException("unsupported", 0, "当前网关不支持团队活动")
+        }
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope)
+        repository.connect(endpoint)
+        advanceUntilIdle()
+
+        repository.refreshTeamActivity()
+
+        // 旧网关：面板显示降级提示，数据保持 null，不抛异常。
+        assertNull(repository.teamActivity.value)
+        assertTrue(repository.teamActivityUnsupported.value)
+        // 聊天主流程完全不受影响。
+        assertEquals(ConnectionPhase.CONNECTED, repository.connection.value.phase)
+        assertEquals(1, repository.messages.value.size)
+        testScope.cancel()
+    }
+
+    @Test
+    fun `legacy gateway 404 not_found degrades without a warning`() = runTest {
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "会话一"))
+            // 旧网关的真实行为：没有该路由 → HTTP 404 + code not_found（lib/http.js writeError）。
+            fakeApi.teamActivityError = GatewayException("not_found", 404, "no such endpoint")
+        }
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope)
+        repository.connect(endpoint)
+        advanceUntilIdle()
+
+        val notices = mutableListOf<String>()
+        testScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            repository.notices.collect { notices += it.text }
+        }
+        advanceUntilIdle()
+
+        repository.refreshTeamActivity()
+        repository.refreshTeamActivity()
+
+        // 404 按降级处理：面板显示「升级网关」提示，数据保持 null、不弹 WARN。
+        assertNull(repository.teamActivity.value)
+        assertTrue(repository.teamActivityUnsupported.value)
+        assertEquals(0, notices.count { it.startsWith("团队活动刷新失败") })
+        assertEquals(ConnectionPhase.CONNECTED, repository.connection.value.phase)
+        testScope.cancel()
+    }
+
+    @Test
+    fun `switching session and disconnect clear team activity`() = runTest {
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(
+                SessionSummary(id = "s1", title = "会话一"),
+                SessionSummary(id = "s2", title = "会话二"),
+            )
+            fakeApi.teamActivity = TeamActivity(
+                sessionId = "s1",
+                subagents = listOf(ActivitySubagent(id = "c1", title = "dev", running = true)),
+            )
+        }
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope)
+        repository.connect(endpoint)
+        advanceUntilIdle()
+        repository.refreshTeamActivity()
+        assertEquals("s1", repository.teamActivity.value?.sessionId)
+
+        // 切会话：上一个会话的子智能体不能串台。
+        repository.selectSession("s2")
+        advanceUntilIdle()
+        assertNull(repository.teamActivity.value)
+
+        repository.refreshTeamActivity()
+        assertEquals(listOf("s1", "s2"), transport.fakeApi.teamActivityRequests)
+
+        // 断开连接：清空数据与「旧网关」标记。
+        repository.disconnect()
+        assertNull(repository.teamActivity.value)
+        assertFalse(repository.teamActivityUnsupported.value)
+        testScope.cancel()
+    }
+
+    @Test
+    fun `subagent preview opens without touching the main chat state`() = runTest {
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "会话一"))
+            fakeApi.messagesPage = MessagesPage(messages = listOf(Message(seq = 5, role = "user", text = "hi")))
+        }
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope)
+        repository.connect(endpoint)
+        advanceUntilIdle()
+        val mainSessionId = repository.selectedSessionId.value
+        val mainMessages = repository.messages.value
+        val mainRunning = repository.sessionRunning.value
+
+        repository.openSubagentPreview(
+            ActivitySubagent(
+                id = "child-1",
+                parentSessionId = "s1",
+                title = "gateway-dev",
+                running = true,
+                model = "deepseek-v4.1-flash",
+                mode = ActivitySubagent.MODE_CONTINUABLE,
+            ),
+        )
+
+        val preview = repository.subagentPreview.value
+        assertNotNull(preview)
+        assertEquals("child-1", preview?.sessionId)
+        assertEquals("s1", preview?.parentSessionId)
+        assertEquals("continuable", preview?.mode)
+        assertEquals("gateway-dev", preview?.displayTitle)
+        assertEquals(1, preview?.messages?.size)
+        assertEquals(false, preview?.loading)
+        assertNull(preview?.error)
+        // 请求带上了 DSH subagent 地址需要的 parent + mode。
+        assertEquals(
+            listOf(Triple("child-1", "s1", "continuable")),
+            transport.fakeApi.subagentMessageRequests,
+        )
+        // 主聊天三项状态完全不动：子代理会话不会被当成主会话。
+        assertEquals(mainSessionId, repository.selectedSessionId.value)
+        assertEquals(mainMessages, repository.messages.value)
+        assertEquals(mainRunning, repository.sessionRunning.value)
+        testScope.cancel()
+    }
+
+    @Test
+    fun `subagent preview refresh picks up new messages and keeps them on failure`() = runTest {
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "会话一"))
+            fakeApi.messagesPage = MessagesPage(messages = listOf(Message(seq = 5, role = "user", text = "hi")))
+        }
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope)
+        repository.connect(endpoint)
+        advanceUntilIdle()
+        repository.openSubagentPreview(
+            ActivitySubagent(id = "child-1", parentSessionId = "s1", title = "dev", running = true),
+        )
+        assertEquals(1, repository.subagentPreview.value?.messages?.size)
+
+        // 运行中的子代理：下一次刷新能看到新消息。
+        transport.fakeApi.messagesPage = MessagesPage(
+            messages = listOf(
+                Message(seq = 5, role = "user", text = "hi"),
+                Message(seq = 6, role = "assistant", text = "done"),
+            ),
+        )
+        repository.refreshSubagentPreview()
+        assertEquals(2, repository.subagentPreview.value?.messages?.size)
+
+        // 失败：保留旧消息，只把错误文案放出来（预览页底部显示重试）。
+        transport.fakeApi.error = java.io.IOException("boom")
+        repository.refreshSubagentPreview()
+        val failed = repository.subagentPreview.value
+        assertEquals(2, failed?.messages?.size)
+        assertNotNull(failed?.error)
+        assertEquals(false, failed?.loading)
+        testScope.cancel()
+    }
+
+    @Test
+    fun `subagent preview closes on back, session switch and disconnect`() = runTest {
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(
+                SessionSummary(id = "s1", title = "会话一"),
+                SessionSummary(id = "s2", title = "会话二"),
+            )
+            fakeApi.messagesPage = MessagesPage(messages = listOf(Message(seq = 1, role = "user", text = "hi")))
+        }
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope)
+        repository.connect(endpoint)
+        advanceUntilIdle()
+        val agent = ActivitySubagent(id = "child-1", parentSessionId = "s1", title = "dev", running = true)
+
+        repository.openSubagentPreview(agent)
+        assertNotNull(repository.subagentPreview.value)
+        repository.closeSubagentPreview()
+        assertNull(repository.subagentPreview.value)
+
+        repository.openSubagentPreview(agent)
+        assertNotNull(repository.subagentPreview.value)
+        repository.selectSession("s2")
+        advanceUntilIdle()
+        assertNull(repository.subagentPreview.value)
+
+        repository.openSubagentPreview(agent)
+        assertNotNull(repository.subagentPreview.value)
+        repository.disconnect()
+        assertNull(repository.subagentPreview.value)
+        testScope.cancel()
+    }
+
+    @Test
+    fun `subagent preview without a parent session is ignored`() = runTest {
+        val transport = FakeTransport().apply {
+            fakeApi.sessions = listOf(SessionSummary(id = "s1", title = "会话一"))
+        }
+        val testScope = scope(StandardTestDispatcher(testScheduler))
+        val repository = GatewayRepository(transport, testScope)
+        repository.connect(endpoint)
+        advanceUntilIdle()
+
+        repository.openSubagentPreview(ActivitySubagent(id = "child-1"))
+
+        // 没有父会话就无法寻址：宁可不打开，也不发一个会被 DSH 502 的普通会话请求。
+        assertNull(repository.subagentPreview.value)
+        assertTrue(transport.fakeApi.subagentMessageRequests.isEmpty())
         testScope.cancel()
     }
 }

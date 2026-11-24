@@ -70,11 +70,13 @@ window.__ModuleLoader__.load({
       'pairing.lan': '局域网（HTTP，免证书）',
       'pairing.public': '公网（HTTPS）',
       'pairing.fingerprint': '证书指纹',
-      'pairing.cert': '内置证书',
-      'pairing.certEmbedded': '已写入二维码（App 直接固定，无需装到系统）',
+      'pairing.cert': '二维码证书',
+      'pairing.certEmbedded': '已内嵌整张证书（App 直接固定，无需装到系统）',
+      'pairing.certFingerprint': '仅证书指纹（App 直接固定，无需装到系统）',
+      'pairing.publicCandidates': '公网候选地址',
       'pairing.certNone': '—',
       'pairing.note': '局域网版二维码走明文 HTTP：不需要证书，也不需要设备令牌。二维码含一次性配对码，请勿截图外传。',
-      'pairing.notePublic': '公网版二维码内含公网地址和自签证书：手机扫码后直接在 App 内固定该证书，不需要把证书装进系统。二维码含一次性配对码，请勿截图外传。',
+      'pairing.notePublic': '公网版二维码内含公网地址和自签证书的 SHA-256 指纹：手机扫码后直接固定该证书，不需要把证书装进系统。只带指纹（不塞整张证书）码点更疏、更好扫。二维码含一次性配对码，请勿截图外传。',
       'pairing.creating': '正在生成…',
       'devices.remote': '最近来源',
       'devices.seen': '最近活跃',
@@ -134,11 +136,13 @@ window.__ModuleLoader__.load({
       'pairing.lan': 'LAN (plain HTTP, no certificate)',
       'pairing.public': 'Public (HTTPS)',
       'pairing.fingerprint': 'Certificate fingerprint',
-      'pairing.cert': 'Embedded certificate',
-      'pairing.certEmbedded': 'Inside the QR (the app pins it; no system install)',
+      'pairing.cert': 'QR certificate',
+      'pairing.certEmbedded': 'Full certificate inside the QR (the app pins it; no system install)',
+      'pairing.certFingerprint': 'Fingerprint only (the app pins it; no system install)',
+      'pairing.publicCandidates': 'Public candidates',
       'pairing.certNone': '—',
       'pairing.note': 'The LAN QR uses plain HTTP: no certificate and no device token. It contains a one-shot code — do not share a screenshot.',
-      'pairing.notePublic': 'The public QR carries the public URL and the self-signed certificate: after scanning, the app pins that certificate itself, so nothing has to be installed into the system store. It contains a one-shot code — do not share a screenshot.',
+      'pairing.notePublic': 'The public QR carries the public URL and the SHA-256 fingerprint of the self-signed certificate: after scanning, the app pins that certificate itself, so nothing has to be installed into the system store. Fingerprint only (no certificate body) keeps the code sparse enough to scan. It contains a one-shot code — do not share a screenshot.',
       'pairing.creating': 'Generating…',
       'devices.remote': 'Last source',
       'devices.seen': 'Last seen',
@@ -692,12 +696,17 @@ window.__ModuleLoader__.load({
           [t('pairing.mode'), t(pairing.mode === 'public' ? 'pairing.modePublic' : 'pairing.modeLan')],
           [t('pairing.lan'), pairing.lanUrl === null ? '—' : pairing.lanUrl],
           [t('pairing.public'), pairing.publicUrl === null ? '—' : pairing.publicUrl],
+          ...(Array.isArray(pairing.publicUrls) && pairing.publicUrls.length > 1
+            ? [[t('pairing.publicCandidates'), pairing.publicUrls.join('  ')]]
+            : []),
           [t('pairing.fingerprint'), state.fingerprintPretty === '' || state.fingerprintPretty === undefined
             ? '—'
             : h('span', { className: CLS + '-mono' }, state.fingerprintPretty)],
-          [t('pairing.cert'), pairing.certificate === null || pairing.certificate === undefined
+          [t('pairing.cert'), pairing.mode !== 'public'
             ? t('pairing.certNone')
-            : t('pairing.certEmbedded')],
+            : (pairing.certificate === null || pairing.certificate === undefined
+              ? t('pairing.certFingerprint')
+              : t('pairing.certEmbedded'))],
         ];
 
         const statusPanel = h('div', { className: CLS + '-panel' },

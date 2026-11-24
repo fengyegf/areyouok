@@ -13,6 +13,7 @@ import com.catmoecircle.areyouok.gateway.protocol.PermissionResult
 import com.catmoecircle.areyouok.gateway.protocol.SetTeamEnabledResponse
 import com.catmoecircle.areyouok.gateway.protocol.SessionState
 import com.catmoecircle.areyouok.gateway.protocol.SessionSummary
+import com.catmoecircle.areyouok.gateway.protocol.TeamActivity
 import com.catmoecircle.areyouok.gateway.protocol.TranslateResponse
 import com.catmoecircle.areyouok.gateway.protocol.TranslationProvidersResponse
 import com.catmoecircle.areyouok.gateway.protocol.UploadFileResponse
@@ -70,6 +71,14 @@ class GatewayException(
 
         /** 翻译超时（HTTP 504）：重试有意义。 */
         const val CODE_TRANSLATION_TIMEOUT = "translation_timeout"
+
+        /**
+         * 网关没有这个端点（旧版本 dsh-gateway）。
+         *
+         * 客户端把它当成「降级」而不是错误：团队活动面板显示空态/不支持提示，
+         * 不弹 toast、不影响聊天主流程。
+         */
+        const val CODE_UNSUPPORTED = "unsupported"
     }
 }
 
@@ -97,6 +106,15 @@ interface GatewayApi {
         sessionId: String,
         beforeSeq: Long? = null,
         limit: Int? = null,
+        /**
+         * 子智能体预览：该子代理的**直接父会话** id（与 [mode] 同时给出时才生效）。
+         *
+         * DSH 只接受 `{kind:'subagent',parentSessionId,childSessionId,mode}` 地址读取子代理历史；
+         * 不带这两个参数时按普通会话地址走（子代理会话会被 DSH 拒绝，这是预期行为）。
+         */
+        parentSessionId: String? = null,
+        /** 子智能体模式：`one-shot` / `continuable` / `unknown`。 */
+        mode: String? = null,
     ): MessagesPage
 
     suspend fun sendMessage(
@@ -150,6 +168,18 @@ interface GatewayApi {
      * 实现必须校验响应里的 `enabled` 与请求一致，否则抛 [GatewayException]。
      */
     suspend fun setTeamEnabled(sessionId: String, enabled: Boolean): SetTeamEnabledResponse
+
+    /**
+     * GET /v1/sessions/{id}/activity：当前会话树的团队活动（子智能体 + 后台任务 + 任务板）。
+     *
+     * 默认实现直接抛 [GatewayException.CODE_UNSUPPORTED]：旧网关没有该端点时，
+     * 右侧团队协作面板显示空态/不支持提示，聊天主流程完全不受影响。
+     */
+    suspend fun sessionActivity(sessionId: String): TeamActivity = throw GatewayException(
+        GatewayException.CODE_UNSUPPORTED,
+        0,
+        "当前网关不支持团队活动",
+    )
 
     suspend fun interventions(status: String = "pending"): List<Intervention>
 

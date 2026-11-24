@@ -58,8 +58,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size as ComposeSize
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -79,6 +83,7 @@ import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.min
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Back
@@ -349,7 +354,7 @@ private class QrFrameAnalyzer(
     }
 }
 
-/** 取景层：四边压暗 + 中间取景框，底部提示语，顶部「关闭 / 相册」两个按钮。 */
+/** 取景层：四周压暗 + 中间圆角取景框，底部提示语，顶部「关闭 / 相册」两个按钮。 */
 @Composable
 private fun QrScanOverlay(
     prompt: String,
@@ -374,24 +379,33 @@ private fun QrScanOverlay(
                 val holePx = size.minDimension * 0.66f
                 val left = (size.width - holePx) / 2f
                 val top = (size.height - holePx) / 2f
+                val corner = min(28.dp.toPx(), holePx / 2f)
                 val scrim = Color.Black.copy(alpha = 0.5f)
-                drawRect(scrim, Offset.Zero, ComposeSize(size.width, top))
-                drawRect(
-                    scrim,
-                    Offset(0f, top + holePx),
-                    ComposeSize(size.width, size.height - top - holePx),
-                )
-                drawRect(scrim, Offset(0f, top), ComposeSize(left, holePx))
-                drawRect(
-                    scrim,
-                    Offset(left + holePx, top),
-                    ComposeSize(size.width - left - holePx, holePx),
-                )
+
+                // 遮罩用「整屏减去圆角取景框」的单条路径一次画完。
+                // 早先是四条 drawRect 拼出的**方形**洞：洞是直角、描边却是圆角，
+                // 四个角上就各露出一块没被压暗的方块，看着像两层 UI 叠在一起。
+                val mask = Path().apply {
+                    fillType = PathFillType.EvenOdd
+                    addRect(Rect(Offset.Zero, size))
+                    addRoundRect(
+                        RoundRect(
+                            left = left,
+                            top = top,
+                            right = left + holePx,
+                            bottom = top + holePx,
+                            radiusX = corner,
+                            radiusY = corner,
+                        ),
+                    )
+                }
+                drawPath(mask, scrim)
+
                 drawRoundRect(
                     color = Color.White.copy(alpha = 0.92f),
                     topLeft = Offset(left, top),
                     size = ComposeSize(holePx, holePx),
-                    cornerRadius = CornerRadius(28.dp.toPx(), 28.dp.toPx()),
+                    cornerRadius = CornerRadius(corner, corner),
                     style = Stroke(width = 3.dp.toPx()),
                 )
             }

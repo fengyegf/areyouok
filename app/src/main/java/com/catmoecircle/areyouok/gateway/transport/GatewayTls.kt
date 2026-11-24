@@ -218,7 +218,10 @@ internal class PinnedHostnameVerifier(
 ) : HostnameVerifier {
 
     override fun verify(hostname: String?, session: SSLSession?): Boolean {
-        val host = hostname?.trim()?.lowercase().orEmpty()
+        // OkHttp 传给 HostnameVerifier 的主机名对 IPv6 可能带方括号（`[2408::1]`），
+        // 而 [GatewayPins] 的键统一不带括号。这里必须走同一套归一化，否则公网 IPv6
+        // 网关命中不了 pin，会回落到系统校验 —— 自签证书必然握手失败。
+        val host = GatewayPins.normalizeHost(hostname)
         if (host.isEmpty()) return false
         val pin = GatewayPins.lookup(host)
         if (pin == null) return fallback.verify(hostname, session)

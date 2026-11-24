@@ -36,6 +36,7 @@ import { MdnsAdvertiser } from './mdns.js'
 import { ensureTlsMaterial } from './tls.js'
 import { mountPanel } from './panel-routes.js'
 import { watchTurnEnds } from './turns.js'
+import { ActivityTracker, watchSessionEvents } from './activity.js'
 import {
   normalizeWaterfall,
   normalizeSessionRecord,
@@ -75,6 +76,21 @@ export function createGateway(options) {
    * 绝不应该挡住 7788/7789 的监听和 DSH 回环连接。
    */
   const translate = new TranslationService({ config, logger, dir })
+
+  /**
+   * 后台任务追踪器：团队活动面板「后台任务」下半区的数据源。
+   *
+   * 与 turn.completed 一样在 start() 之前订阅 session/event：插件加载完成到
+   * 端口就绪之间开始的 job 也不会漏。ctx.on 在测试上下文里可能不存在，此时是
+   * 一个空操作。
+   */
+  const activity = new ActivityTracker({ logger })
+  let stopActivityWatch = () => {}
+  try {
+    stopActivityWatch = watchSessionEvents({ ctx, tracker: activity, logger })
+  } catch (error) {
+    logger.warn(`background job tracker unavailable: ${error?.message ?? error}`)
+  }
 
   /**
    * 每轮结束的事实源：订阅宿主 `session/event · turn/end`，广播 `turn.completed`。
@@ -256,6 +272,7 @@ export function createGateway(options) {
         tls,
         dir,
         translate,
+        activity,
         onUpgrade: (req, socket, head) => ws?.handleUpgrade(req, socket, head),
       })
       ports = await api.start()
@@ -303,6 +320,17 @@ export function createGateway(options) {
     }
     stopTurnWatch = () => {}
     try {
+      stopActivityWatch?.()
+    } catch {
+      // ignore
+    }
+    stopActivityWatch = () => {}
+    try {
+      activity.clear()
+    } catch {
+      // ignore
+    }
+    try {
       unmountPanel?.()
     } catch {
       // ignore
@@ -339,6 +367,7 @@ export function createGateway(options) {
     hub,
     auth,
     translate,
+    activity,
     config,
     dir,
     logger,

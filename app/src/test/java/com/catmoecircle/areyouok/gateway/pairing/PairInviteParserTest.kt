@@ -3,6 +3,7 @@ package com.catmoecircle.areyouok.gateway.pairing
 import com.catmoecircle.areyouok.gateway.transport.GatewayEndpoint
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -185,6 +186,21 @@ class PairInviteParserTest {
         assertEquals("https://[2408:1]:7789", parsed.baseUrl)
         assertTrue(parsed.preferPublic)
         assertEquals("AQID", parsed.certificateBase64)
+    }
+
+    @Test
+    fun `public mode link without certificate still parses`() {
+        // 公网二维码只带指纹、不再内嵌 1.4KB 证书：没有 cert= 也必须能解析。
+        val fingerprint = "3f".repeat(32)
+        val invite = PairInviteParser.parse(
+            "dshgw://pair?mode=pub&pub=https%3A%2F%2Fgw.example.com%3A7789" +
+                "&code=ABC123&fp=$fingerprint&n=FY-PC",
+        )
+        requireNotNull(invite)
+        assertTrue(invite.preferPublic)
+        assertEquals("https://gw.example.com:7789", invite.httpsUrl)
+        assertNotNull(invite.fingerprint)
+        assertNull(invite.certificateDer())
     }
 
     @Test

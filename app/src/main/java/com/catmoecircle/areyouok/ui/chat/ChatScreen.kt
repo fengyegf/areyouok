@@ -116,11 +116,14 @@ import com.catmoecircle.areyouok.gateway.protocol.QuestionAnswer
 import com.catmoecircle.areyouok.gateway.protocol.ReasoningEffort
 import com.catmoecircle.areyouok.gateway.protocol.SendMessageRequest
 import com.catmoecircle.areyouok.gateway.protocol.SessionSummary
+import com.catmoecircle.areyouok.gateway.protocol.ActivitySubagent
+import com.catmoecircle.areyouok.gateway.protocol.TeamActivity
 import com.catmoecircle.areyouok.gateway.protocol.effectivePermissionPreset
 import com.catmoecircle.areyouok.gateway.repository.ChatMessage
 import com.catmoecircle.areyouok.gateway.repository.ChatRole
 import com.catmoecircle.areyouok.gateway.repository.SessionProject
 import com.catmoecircle.areyouok.gateway.repository.SessionProjectGrouping
+import com.catmoecircle.areyouok.gateway.repository.SubagentPreview
 import com.catmoecircle.areyouok.gateway.repository.ConnectionState
 import com.catmoecircle.areyouok.gateway.repository.ConnectionPhase
 import com.catmoecircle.areyouok.gateway.repository.ThinkingTranslation
@@ -144,6 +147,7 @@ import com.catmoecircle.areyouok.ui.settings.openTaskChannelSettings
 import com.catmoecircle.areyouok.ui.settings.WorkStepDisplay
 import com.catmoecircle.areyouok.ui.settings.WorkStepFoldedReplies
 import com.catmoecircle.areyouok.ui.theme.AreYouOKTheme
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import top.yukonga.miuix.kmp.basic.Icon
@@ -237,6 +241,9 @@ fun ChatScreen(modifier: Modifier = Modifier) {
     val pendingInterventions by repository.pendingInterventions.collectAsState()
     val modelCatalog by repository.modelCatalog.collectAsState()
     val permissionCatalog by repository.permissionCatalog.collectAsState()
+    val teamActivity by repository.teamActivity.collectAsState()
+    val teamActivityUnsupported by repository.teamActivityUnsupported.collectAsState()
+    val subagentPreview by repository.subagentPreview.collectAsState()
     val translations by repository.translations.collectAsState()
     val selectedSession = remember(sessions, selectedSessionId) {
         sessions.firstOrNull { it.id == selectedSessionId }
@@ -249,6 +256,8 @@ fun ChatScreen(modifier: Modifier = Modifier) {
     // 输入框里待发送的附件：选文件时读进内存，发送成功后清空（切会话也清空）。
     var attachments by remember { mutableStateOf<List<ComposerAttachment>>(emptyList()) }
     var sidebarOpen by rememberSaveable { mutableStateOf(false) }
+    // 右侧「团队协作」面板（右上连接胶囊的入口）：与左侧边栏互斥。
+    var teamPanelOpen by rememberSaveable { mutableStateOf(false) }
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     var pairing by remember { mutableStateOf(false) }
     var pairError by remember { mutableStateOf<String?>(null) }
@@ -351,11 +360,15 @@ fun ChatScreen(modifier: Modifier = Modifier) {
 
     // 配对新网关的公共流程：配对码为空按局域网直连，否则先 POST /v1/pair 换 token。
     suspend fun performConnect(url: String, code: String, invite: PairInvite?): GatewayEndpoint {
+        val baseUrl = GatewayEndpoint.normalizeBaseUrl(url)
+            ?: throw IllegalArgumentException(invalidUrlText)
+        // 二维码里可能写进了代理/TUN 网卡（如 Clash 的 198.18.0.1）或本机回环地址：
+        // 手机自己的 VPN 也占用这些网段，连过去会被劫持，最后只看到一句「TLS 握手失败」。
+        // 这类地址必然连不上，配对前就拦下并说明该换什么地址。
+        GatewayEndpoint.virtualAddressHint(baseUrl)?.let { throw IllegalArgumentException(it) }
         // 公网 HTTPS 网关用自签证书：先把二维码里带的证书固定进 App（不写系统库），
         // 后面的 POST /v1/pair、REST 与 wss 才能通过 TLS 校验。
         runtime.adoptInvite(invite)
-        val baseUrl = GatewayEndpoint.normalizeBaseUrl(url)
-            ?: throw IllegalArgumentException(invalidUrlText)
         // 邀请里的网关名只对同一个地址有效；手改地址后不再沿用。
         val inviteName = invite
             ?.takeIf { GatewayEndpoint.normalizeBaseUrl(it.baseUrl) == baseUrl }
@@ -483,6 +496,35 @@ fun ChatScreen(modifier: Modifier = Modifier) {
         attachments = emptyList()
     }
 
+    // 切会话 / 断开连接时收起面板（数据已由 repository 清空）：不停在一个空壳面板上。
+    // 用「上一次的会话 id」比较，首次组合/旋转恢复（rememberSaveable）不会误关。
+    var lastPanelSessionId by remember { mutableStateOf(selectedSessionId) }
+    LaunchedEffect(selectedSessionId, connection.isOnline) {
+        if (teamPanelOpen && (selectedSessionId != lastPanelSessionId || !connection.isOnline)) {
+            teamPanelOpen = false
+        }
+        lastPanelSessionId = selectedSessionId
+    }
+
+    // 团队面板打开期间每 2s 刷新一次活动数据；关闭 / 切会话 / 未连接即停。
+    // 切会话、断开连接时的清空由 repository 负责，这里只驱动轮询。
+    LaunchedEffect(teamPanelOpen, connection.isOnline, selectedSessionId) {
+        if (!teamPanelOpen || !connection.isOnline || selectedSessionId == null) return@LaunchedEffect
+        while (true) {
+            repository.refreshTeamActivity()
+            delay(2_000)
+        }
+    }
+
+    // 子智能体只读预览打开期间每 2s 刷新（失败保留旧消息，错误文案显示在预览页底部）。
+    LaunchedEffect(subagentPreview?.sessionId, connection.isOnline) {
+        if (subagentPreview == null || !connection.isOnline) return@LaunchedEffect
+        while (true) {
+            delay(2_000)
+            repository.refreshSubagentPreview()
+        }
+    }
+
     // 设置页打开时让聊天内容退出无障碍树，避免读屏聚焦到被盖住的控件。
     val chatModifier = if (settingsOpen) {
         modifier.clearAndSetSemantics { }
@@ -546,7 +588,36 @@ fun ChatScreen(modifier: Modifier = Modifier) {
             },
             onStop = { scope.launch { repository.interrupt() } },
             onLoadOlder = { repository.loadOlderMessages() },
-            onOpenSidebar = { sidebarOpen = true },
+            // 左上菜单按钮仍然打开左侧边栏；右上胶囊改开团队面板，两者互斥。
+            onOpenSidebar = {
+                teamPanelOpen = false
+                sidebarOpen = true
+            },
+            onOpenTeamPanel = {
+                focusManager.clearFocus()
+                sidebarOpen = false
+                teamPanelOpen = true
+            },
+            teamPanelOpen = teamPanelOpen,
+            onDismissTeamPanel = { teamPanelOpen = false },
+            teamActivity = teamActivity,
+            teamActivityUnsupported = teamActivityUnsupported,
+            subagentPreview = subagentPreview,
+            onOpenSubagent = { agent ->
+                // 没有父会话时无法寻址（repository 会忽略）：别先把面板收起来，
+                // 否则用户点了会看到面板消失却什么都没发生。
+                if (agent.previewAddress() != null) {
+                    // 打开子代理的只读对话时收起团队面板（返回时再打开）。
+                    teamPanelOpen = false
+                    scope.launch { repository.openSubagentPreview(agent) }
+                }
+            },
+            onCloseSubagentPreview = {
+                repository.closeSubagentPreview()
+                // 回到入口：重新打开团队面板，看到刚才是哪一份列表。
+                teamPanelOpen = true
+            },
+            onRetrySubagentPreview = { scope.launch { repository.refreshSubagentPreview() } },
             sidebarOpen = sidebarOpen,
             onDismissSidebar = { sidebarOpen = false },
             onSelectSession = { id ->
@@ -819,6 +890,20 @@ fun ChatScreenContent(
     onOpenSidebar: () -> Unit,
     sidebarOpen: Boolean,
     onDismissSidebar: () -> Unit,
+    /** 右侧「团队协作」面板（右上连接胶囊打开；左上菜单按钮仍开左侧边栏）。 */
+    teamPanelOpen: Boolean = false,
+    onOpenTeamPanel: () -> Unit = {},
+    onDismissTeamPanel: () -> Unit = {},
+    /** 团队活动数据（`GET /v1/sessions/{id}/activity`）；null 表示还没拉到，显示空态。 */
+    teamActivity: TeamActivity? = null,
+    /** 当前网关没有 activity 端点（旧 dsh-gateway）：面板显示降级提示。 */
+    teamActivityUnsupported: Boolean = false,
+    /** 子智能体只读预览；非空时整页盖住聊天（返回后回到团队面板）。 */
+    subagentPreview: SubagentPreview? = null,
+    /** 点子智能体行：打开它的只读对话。 */
+    onOpenSubagent: (ActivitySubagent) -> Unit = {},
+    onCloseSubagentPreview: () -> Unit = {},
+    onRetrySubagentPreview: () -> Unit = {},
     onSelectSession: (String) -> Unit,
     onNewSession: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -879,6 +964,16 @@ fun ChatScreenContent(
 
     BackHandler(enabled = sidebarOpen) {
         onDismissSidebar()
+    }
+
+    // 面板打开时返回键先收面板（后注册的 BackHandler 优先，二者互斥不会同时启用）。
+    BackHandler(enabled = teamPanelOpen) {
+        onDismissTeamPanel()
+    }
+
+    // 只读预览打开时返回键回团队面板（最后注册，优先级最高）。
+    BackHandler(enabled = subagentPreview != null) {
+        onCloseSubagentPreview()
     }
 
     // ---- 输入框的模型 / 思考强度 / 权限 -------------------------------------
@@ -1028,7 +1123,10 @@ fun ChatScreenContent(
 
             ConnectionPill(
                 state = state.connection,
-                onClick = onOpenSidebar,
+                onClick = {
+                    focusManager.clearFocus()
+                    onOpenTeamPanel()
+                },
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .windowInsetsPadding(WindowInsets.statusBars)
@@ -1232,10 +1330,35 @@ fun ChatScreenContent(
             onScan = onOpenScanner,
             pendingSessionIds = pendingSessionIds,
         )
+
+        // 右侧团队协作面板：与左侧边栏互斥；点遮罩 / 返回键 / 关闭按钮收起。
+        TeamActivityPanel(
+            open = teamPanelOpen,
+            activity = teamActivity,
+            unsupported = teamActivityUnsupported,
+            onDismiss = onDismissTeamPanel,
+            onOpenSubagent = onOpenSubagent,
+        )
+
+        // 子智能体只读对话页：全屏盖住聊天；主聊天的草稿/滚动/选中会话都不受影响。
+        subagentPreview?.let { preview ->
+            SubagentPreviewScreen(
+                preview = preview,
+                onBack = onCloseSubagentPreview,
+                onRetry = onRetrySubagentPreview,
+                workStepDisplay = workStepDisplay,
+                workStepCollapseTiming = workStepCollapseTiming,
+                workStepFoldedReplies = workStepFoldedReplies,
+                translationEnabled = translationEnabled,
+                translations = translations,
+                onTranslate = onTranslate,
+                imageFetcher = imageFetcher,
+            )
+        }
     }
 }
 
-/** 顶部右侧的连接状态胶囊，点按打开侧边栏。 */
+/** 顶部右侧的连接状态胶囊，点按打开右侧「团队协作」面板（左侧边栏走左上菜单按钮）。 */
 @Composable
 private fun ConnectionPill(
     state: ConnectionState,
@@ -1243,13 +1366,15 @@ private fun ConnectionPill(
     modifier: Modifier = Modifier,
 ) {
     val colorScheme = MaterialTheme.colorScheme
+    val label = stringResource(R.string.team_panel_open)
     Row(
         modifier = modifier
             .heightIn(min = 32.dp)
             .clip(CircleShape)
             .background(colorScheme.surface)
             .border(1.dp, colorScheme.outline.copy(alpha = 0.22f), CircleShape)
-            .clickable(role = Role.Button, onClick = onClick)
+            .clickable(onClickLabel = label, role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = label }
             .padding(horizontal = 12.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

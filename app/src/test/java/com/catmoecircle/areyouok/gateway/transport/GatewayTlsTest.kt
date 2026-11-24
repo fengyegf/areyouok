@@ -58,4 +58,20 @@ class GatewayTlsTest {
         GatewayPins.clear("gw.example.com")
         assertNull(GatewayPins.lookup("gw.example.com"))
     }
+
+    @Test
+    fun `ipv6 pin matches whether or not the host keeps brackets`() {
+        // HostnameVerifier 可能收到 `[2408::1]`，而 pin 的键统一不带括号。
+        GatewayPins.clearAll()
+        val der = ByteArray(24) { (it * 5).toByte() }
+        val fingerprint = GatewayTls.fingerprintOf(der)
+        requireNotNull(GatewayPins.install("2408::1", der, fingerprint))
+        assertEquals("2408::1", GatewayPins.normalizeHost("[2408::1]"))
+        val bracketed = requireNotNull(GatewayPins.lookup("[2408::1]"))
+        val plain = requireNotNull(GatewayPins.lookup("2408::1"))
+        assertEquals(fingerprint, bracketed.fingerprint)
+        assertEquals(fingerprint, plain.fingerprint)
+        assertEquals(bracketed.fingerprint, plain.fingerprint)
+        GatewayPins.clearAll()
+    }
 }

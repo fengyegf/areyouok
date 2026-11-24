@@ -55,6 +55,9 @@ export const DEFAULT_PING_MS = 2_000
 /** Missed heartbeats before the socket is terminated (real host: 2). */
 const MAX_MISSED_HEARTBEATS = 2
 
+/** SessionAddress subagent modes accepted by the real host (strict codec enum). */
+const SUBAGENT_ADDRESS_MODES = new Set(['one-shot', 'continuable', 'unknown'])
+
 /** Structured failure a mock RPC handler can throw to answer `ok:false`. */
 export class MockDshError extends Error {
   /**
@@ -1087,7 +1090,7 @@ export class MockDsh {
   }
 
   _eventsPage(request) {
-    const sessionId = request.address?.sessionId ?? request.sessionId ?? ''
+    const sessionId = this._resolveEventAddress(isRecord(request.address) ? request.address : {}, request)
     const records = this.history.get(sessionId) ?? []
     const throughSeq = typeof request.throughSeq === 'number' ? request.throughSeq : Number.POSITIVE_INFINITY
     const beforeSeq = typeof request.beforeSeq === 'number' ? request.beforeSeq : Number.POSITIVE_INFINITY
@@ -1099,6 +1102,53 @@ export class MockDsh {
       records: page,
       hasMore: page.length > 0 && records.some((record) => record.event.seq < page[0].event.seq),
     })
+  }
+
+  /**
+   * Resolve a session/events address the way the real host does.
+   *
+   * The controller accepts two SessionAddress variants: a plain
+   * {kind:'session',sessionId} and
+   * {kind:'subagent',parentSessionId,childSessionId,mode}. A subagent child is
+   * only reachable through the subagent variant; asking for it with a plain
+   * session address is rejected by the host (the gateway then answers 502).
+   *
+   * @param {object} address - request.address (may be missing on legacy calls).
+   * @param {object} request - full request, for the legacy top-level sessionId.
+   * @returns {string} session id whose history to read.
+   */
+  _resolveEventAddress(address, request) {
+    const kind = typeof address.kind === 'string' ? address.kind : 'session'
+    if (kind === 'subagent') {
+      const parentSessionId = typeof address.parentSessionId === 'string' ? address.parentSessionId : ''
+      const childSessionId = typeof address.childSessionId === 'string' ? address.childSessionId : ''
+      const mode = typeof address.mode === 'string' ? address.mode : ''
+      if (parentSessionId === '' || childSessionId === '') {
+        throw argumentsInvalid('session/events', 'subagent address needs parentSessionId and childSessionId')
+      }
+      if (!SUBAGENT_ADDRESS_MODES.has(mode)) {
+        throw argumentsInvalid('session/events', 'subagent address mode must be one-shot, continuable or unknown')
+      }
+      const child = this.sessions.find((item) => item.sessionId === childSessionId)
+      const knownParent = typeof child?.parentSessionId === 'string' ? child.parentSessionId : ''
+      if (knownParent !== '' && knownParent !== parentSessionId) {
+        throw new MockDshError('session/address-invalid', 'subagent address parent does not own child ' + childSessionId)
+      }
+      return childSessionId
+    }
+    if (kind !== 'session') {
+      throw argumentsInvalid('session/events', 'unknown address kind ' + JSON.stringify(kind))
+    }
+    const sessionId = typeof address.sessionId === 'string'
+      ? address.sessionId
+      : typeof request.sessionId === 'string'
+        ? request.sessionId
+        : ''
+    const summary = this.sessions.find((item) => item.sessionId === sessionId)
+    if (typeof summary?.parentSessionId === 'string' && summary.parentSessionId !== '') {
+      throw new MockDshError('session/address-invalid', 'session ' + sessionId + ' is a subagent; a subagent address is required')
+    }
+    return sessionId
   }
 
   _acceptEventResult(flat, call) {

@@ -21,32 +21,84 @@ import QRCode from 'qrcode'
 import { classifyAddress } from './util.js'
 
 /**
+ * Whether one IPv4 address can be advertised as somebody's gateway.
+ *
+ * A gateway URL is only useful when the phone can actually dial it, and some
+ * adapters that *look* like public interfaces are virtual. The important one is
+ * `198.18.0.0/15` (RFC 2544 benchmarking): Clash/Mihomo-style proxies hand it to
+ * their TUN adapter as the fake-ip gateway (`198.18.0.1`). That adapter appears a
+ * few seconds after boot, used to win the public-address ranking over the real
+ * IPv6 address, and ended up in the pairing QR — where a phone running the same
+ * kind of proxy dials its *own* tunnel instead of this gateway and dies in a TLS
+ * handshake that looks exactly like a fingerprint mismatch.
+ * @param {string} address - lowercase dotted IPv4.
+ * @returns {boolean}
+ */
+function isAdvertisableIPv4(address) {
+  const octets = String(address).split('.').map((part) => Number(part))
+  if (octets.length !== 4) return false
+  if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return false
+  const [a, b, c] = octets
+  if (a === 0) return false // 0.0.0.0/8 "this network"
+  if (a === 127) return false // loopback is never enumerated; kept for symmetry
+  if (a === 169 && b === 254) return false // link-local, needs a scope id
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return false // 192.0.0/24, TEST-NET-1
+  if (a === 198 && (b === 18 || b === 19)) return false // 198.18.0.0/15 — proxy TUN fake-ip
+  if (a === 198 && b === 51 && c === 100) return false // TEST-NET-2
+  if (a === 203 && b === 0 && c === 113) return false // TEST-NET-3
+  if (a >= 224) return false // multicast (224/4) and reserved (240/4)
+  return true
+}
+
+/**
+ * Whether one IPv6 address can be advertised as somebody's gateway.
+ *
+ * Link-local needs an interface zone to form a URL, Teredo (`2001:0::/32`) is a
+ * NAT-traversal tunnel whose address is not directly dialable, and the
+ * documentation prefix never belongs to a real host.
+ * @param {string} address - lowercase IPv6 literal, no zone id.
+ * @returns {boolean}
+ */
+function isAdvertisableIPv6(address) {
+  const value = String(address)
+  if (value === '::' || value === '::1') return false
+  if (value.startsWith('::ffff:')) return false // IPv4-mapped: classified as IPv4 anyway
+  if (/^fe[89ab][0-9a-f]:/.test(value)) return false // fe80::/10 link-local
+  if (/^2001:0:/.test(value)) return false // Teredo 2001:0::/32 (also matches 2001:0000:)
+  if (/^2001:db8:/.test(value)) return false // documentation prefix
+  return true
+}
+
+/** Whether an unscoped, lowercased address may appear in a pairing URL. */
+function isAdvertisable(address) {
+  return address.includes(':') ? isAdvertisableIPv6(address) : isAdvertisableIPv4(address)
+}
+
+/**
  * Enumerate this machine's addresses, split into LAN and public buckets.
  *
  * LAN means "private/link-local/ULA and therefore reachable over plain HTTP
- * without a certificate". Link-local IPv6 is skipped on purpose: a URL needs a
- * zone id to use it, so phones cannot reach it.
+ * without a certificate". Addresses that a phone cannot dial at all (virtual
+ * TUN/fake-ip ranges, tunnels, benchmark and documentation prefixes) are dropped
+ * instead of being advertised: a wrong public URL is worse than no public URL,
+ * because the QR looks valid while every connection attempt fails.
+ * @param {Record<string, Array<object>|undefined>} [interfaces] - `os.networkInterfaces()` seam for tests.
  * @returns {{lan:string[], public:string[], all:string[]}}
  */
-export function enumerateAddresses() {
+export function enumerateAddresses(interfaces = networkInterfaces()) {
   const lan = []
   const publicList = []
-  let interfaces = {}
-  try {
-    interfaces = networkInterfaces()
-  } catch {
-    interfaces = {}
-  }
+  let table = interfaces
+  if (table === null || typeof table !== 'object') table = {}
   const seenLan = new Set()
   const seenPublic = new Set()
-  for (const addresses of Object.values(interfaces)) {
+  for (const addresses of Object.values(table)) {
     for (const entry of addresses ?? []) {
       if (entry === null || typeof entry !== 'object' || entry.internal) continue
       const raw = String(entry.address ?? '')
       const address = raw.split('%')[0].toLowerCase()
-      if (address === '' || address === '0.0.0.0' || address === '::') continue
-      // fe80::/10 link-local needs an interface zone to form a usable URL.
-      if (/^fe[89ab][0-9a-f]:/.test(address)) continue
+      if (address === '') continue
+      if (!isAdvertisable(address)) continue
       const kind = classifyAddress(address)
       if (kind === 'loopback') continue
       if (kind === 'lan') {
@@ -64,6 +116,10 @@ export function enumerateAddresses() {
   // (192.168/16) almost always wins; 10/8 is often a real office LAN while
   // 172.16/12 is frequently a WSL/Hyper-V/Docker virtual switch; CGNAT
   // (100.64/10, Tailscale) and IPv6 last.
+  //
+  // The public bucket ranks the other way round: a global IPv6 address is the
+  // address a phone on mobile data can actually reach, so it must come before
+  // any stray public-looking IPv4 (which is why it is rank 0, not rank 6).
   const rank = (address) => {
     if (!address.includes(':')) {
       const [a, b] = address.split('.').map((part) => Number(part))
@@ -74,11 +130,27 @@ export function enumerateAddresses() {
       return 4
     }
     if (/^f[cd][0-9a-f]{2}:/.test(address)) return 5
-    return 6
+    return 0
   }
   lan.sort((left, right) => rank(left) - rank(right) || left.localeCompare(right))
   publicList.sort((left, right) => rank(left) - rank(right) || left.localeCompare(right))
   return { lan, public: publicList, all: [...lan, ...publicList] }
+}
+
+/**
+ * Keep addresses already advertised in front, so the pairing view does not flip
+ * between interfaces as adapters come and go (a Wi-Fi reconnect, a proxy TUN
+ * appearing, a rotating IPv6 privacy address). New addresses are appended.
+ * @param {string[]} addresses - freshly enumerated addresses, already ranked.
+ * @param {string[]} [previous] - addresses advertised on the previous pass.
+ * @returns {string[]} same members, previous ones first.
+ */
+export function preferStable(addresses, previous = []) {
+  const list = Array.isArray(addresses) ? addresses.filter((value) => typeof value === 'string') : []
+  if (list.length < 2) return list
+  const keep = new Set(Array.isArray(previous) ? previous : [])
+  if (keep.size === 0) return list
+  return [...list.filter((address) => keep.has(address)), ...list.filter((address) => !keep.has(address))]
 }
 
 /** Format an address for use inside a URL (IPv6 wrapped in brackets). */
@@ -166,15 +238,26 @@ function encodeQrMatrix(text, preferredLevel = 'M') {
  *
  * The default edge is LAN plain HTTP: a phone on the same network then connects
  * without any TLS certificate, pairing code or device token. Asking for
- * `mode: 'public'` swaps the QR over to the HTTPS edge and embeds the
- * certificate (`certificate`, base64url DER) so the APK can pin it directly.
+ * `mode: 'public'` swaps the QR over to the HTTPS edge and carries the
+ * certificate's SHA-256 fingerprint (`fp`), which is all the APK needs to
+ * pin the self-signed certificate. The DER body is embedded only when
+ * `embedCertificate` is set: it is ~1.4 kB of base64url and turns a
+ * 57-module code into a 141-module one (~2 px per module in the 290 px panel),
+ * which phone cameras cannot read reliably.
  *
  * The requested edge only wins when it actually has a URL; a machine without a
  * public address still produces a usable LAN code instead of an empty matrix.
- * @param {{pairing:object|null, fingerprint?:string, name?:string, mode?:string, certificate?:string}} input
+ * @param {{pairing:object|null, fingerprint?:string, name?:string, mode?:string, certificate?:string, embedCertificate?:boolean}} input
  * @returns {Promise<object|null>}
  */
-export async function buildPairingView({ pairing, fingerprint = '', name = '', mode = '', certificate = '' } = {}) {
+export async function buildPairingView({
+  pairing,
+  fingerprint = '',
+  name = '',
+  mode = '',
+  certificate = '',
+  embedCertificate = false,
+} = {}) {
   if (pairing === null || typeof pairing !== 'object' || typeof pairing.code !== 'string') return null
   const urls = (Array.isArray(pairing.urls) ? pairing.urls : [])
     .filter((url) => typeof url === 'string' && url.trim() !== '')
@@ -192,7 +275,12 @@ export async function buildPairingView({ pairing, fingerprint = '', name = '', m
     ? publicUrl
     : (lanUrl !== '' ? lanUrl : (publicUrl !== '' ? publicUrl : (urls[0] ?? '')))
   const fp = typeof pairing.fingerprint === 'string' && pairing.fingerprint !== '' ? pairing.fingerprint : fingerprint
-  const cert = selectedMode === 'public' && typeof certificate === 'string' && certificate !== ''
+  /* fp already pins the certificate: the APK compares the SHA-256 of the
+   * certificate it receives during the handshake with this value, so shipping the
+   * DER too only makes the code denser. Keep the escape hatch for clients that
+   * cannot hash, and for anyone debugging a certificate mismatch. */
+  const cert = embedCertificate === true && selectedMode === 'public' &&
+    typeof certificate === 'string' && certificate !== ''
     ? certificate
     : ''
   const uri = url === ''
@@ -221,6 +309,7 @@ export async function buildPairingView({ pairing, fingerprint = '', name = '', m
     url,
     fingerprint: fp || null,
     certificate: cert === '' ? null : cert,
+    certificateEmbedded: cert !== '',
     uri,
     qr: uri === null ? null : encodeQrMatrix(uri, cert === '' ? 'M' : 'L'),
   }
@@ -244,13 +333,14 @@ export async function buildState({
   config = {},
   mode = '',
   certificate = '',
+  embedCertificate = false,
   publicUrls = [],
   lanUrls = [],
   uptimeMs = 0,
   lastError = '',
   serverTime = Date.now(),
 } = {}) {
-  const pairingView = await buildPairingView({ pairing, fingerprint, name, mode, certificate })
+  const pairingView = await buildPairingView({ pairing, fingerprint, name, mode, certificate, embedCertificate })
   return {
     ok: true,
     name,
@@ -270,6 +360,7 @@ export async function buildState({
       mdns: Boolean(config.mdns),
       maxDevices: config.maxDevices ?? 4,
       publicUrl: typeof config.publicUrl === 'string' ? config.publicUrl : '',
+      qrEmbedCertificate: Boolean(config.qrEmbedCertificate),
     },
     publicUrls: Array.isArray(publicUrls) ? publicUrls : [],
     lanUrls: Array.isArray(lanUrls) ? lanUrls : [],
@@ -279,4 +370,12 @@ export async function buildState({
   }
 }
 
-export default { enumerateAddresses, formatHost, normalizePairingMode, pairingUri, buildPairingView, buildState }
+export default {
+  enumerateAddresses,
+  preferStable,
+  formatHost,
+  normalizePairingMode,
+  pairingUri,
+  buildPairingView,
+  buildState,
+}

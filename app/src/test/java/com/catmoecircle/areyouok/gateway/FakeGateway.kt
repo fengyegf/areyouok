@@ -13,6 +13,7 @@ import com.catmoecircle.areyouok.gateway.protocol.PermissionResult
 import com.catmoecircle.areyouok.gateway.protocol.SetTeamEnabledResponse
 import com.catmoecircle.areyouok.gateway.protocol.SessionState
 import com.catmoecircle.areyouok.gateway.protocol.SessionSummary
+import com.catmoecircle.areyouok.gateway.protocol.TeamActivity
 import com.catmoecircle.areyouok.gateway.protocol.Topics
 import com.catmoecircle.areyouok.gateway.protocol.TranslateResponse
 import com.catmoecircle.areyouok.gateway.protocol.TranslationProviderInfo
@@ -40,6 +41,8 @@ class FakeGatewayApi : GatewayApi {
     var olderMessagesPages = mutableMapOf<Long?, MessagesPage>()
     /** 每次 `GET /v1/sessions/{id}/messages` 的入参：(beforeSeq, limit)。 */
     val messageRequests = mutableListOf<Pair<Long?, Int?>>()
+    /** 子智能体预览的 messages 请求入参：(childSessionId, parentSessionId, mode)。 */
+    val subagentMessageRequests = mutableListOf<Triple<String, String?, String?>>()
     var interventions = emptyList<Intervention>()
     var modelCatalog = ModelCatalog()
     var permissionCatalog = PermissionCatalog()
@@ -105,6 +108,15 @@ class FakeGatewayApi : GatewayApi {
     /** 每次 `POST /v1/sessions/{id}/team` 的入参：(sessionId, enabled)。 */
     val teamRequests = mutableListOf<Pair<String, Boolean>>()
 
+    /** `GET /v1/sessions/{id}/activity` 的应答（默认空活动）。 */
+    var teamActivity = TeamActivity()
+
+    /** 只在 activity 请求时抛的失败注入（模拟旧网关 unsupported / 网络失败）。 */
+    var teamActivityError: Throwable? = null
+
+    /** 每次 `GET /v1/sessions/{id}/activity` 的 sessionId（保序）。 */
+    val teamActivityRequests = mutableListOf<String>()
+
     override suspend fun health(): HealthResponse {
         maybeThrow()
         return health
@@ -139,9 +151,14 @@ class FakeGatewayApi : GatewayApi {
         sessionId: String,
         beforeSeq: Long?,
         limit: Int?,
+        parentSessionId: String?,
+        mode: String?,
     ): MessagesPage {
         maybeThrow()
         messageRequests += beforeSeq to limit
+        if (parentSessionId != null || mode != null) {
+            subagentMessageRequests += Triple(sessionId, parentSessionId, mode)
+        }
         return olderMessagesPages[beforeSeq] ?: messagesPage
     }
 
@@ -203,6 +220,13 @@ class FakeGatewayApi : GatewayApi {
             sessionId = response.sessionId ?: sessionId,
             enabled = response.enabled ?: enabled,
         )
+    }
+
+    override suspend fun sessionActivity(sessionId: String): TeamActivity {
+        maybeThrow()
+        teamActivityRequests += sessionId
+        teamActivityError?.let { throw it }
+        return teamActivity
     }
 
     override suspend fun interventions(status: String): List<Intervention> {

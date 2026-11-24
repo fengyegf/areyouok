@@ -7,6 +7,35 @@
     <string name="new_chat">新对话</string>
     <string name="settings">设置</string>
 
+    <!-- 右侧团队协作面板（子智能体 + 后台任务，见 docs/team-activity-panel.md） -->
+    <string name="team_panel_open">打开团队协作面板</string>
+    <string name="team_panel_close">关闭团队协作面板</string>
+    <string name="team_panel_title">团队协作</string>
+    <string name="team_panel_subtitle">子智能体与后台任务</string>
+    <string name="team_panel_team_enabled">团队协作 · 已开启</string>
+    <string name="team_panel_team_disabled">团队协作 · 已关闭</string>
+    <string name="team_panel_task_counts">进行中 %1$d · 待处理 %2$d</string>
+    <string name="team_panel_unsupported">当前网关不支持团队活动，升级 dsh-gateway 后可见</string>
+    <string name="team_panel_subagents">子智能体</string>
+    <string name="team_panel_jobs">后台任务</string>
+    <string name="team_panel_subagents_empty">当前没有子智能体</string>
+    <string name="team_panel_jobs_empty">当前没有运行中的脚本</string>
+    <string name="team_panel_running">运行中</string>
+    <string name="team_panel_idle">已空闲</string>
+    <string name="team_panel_job_stopping">正在停止</string>
+    <string name="team_panel_job_completed">已完成</string>
+    <string name="team_panel_job_killed">已终止</string>
+    <string name="team_panel_job_failed">失败</string>
+    <string name="team_panel_job_unknown">未知</string>
+
+    <!-- 子智能体只读对话页（点团队面板里的子代理打开，见 docs/team-activity-panel.md §5） -->
+    <string name="team_panel_open_subagent">查看子智能体对话</string>
+    <string name="subagent_preview_back">返回团队协作面板</string>
+    <string name="subagent_preview_readonly">只读</string>
+    <string name="subagent_preview_loading">正在加载子智能体对话…</string>
+    <string name="subagent_preview_empty">这个子智能体还没有消息</string>
+    <string name="subagent_preview_retry">重试</string>
+
     <!-- 设置页：分类入口 + 子页 -->
     <string name="settings_title">设置</string>
     <string name="settings_back">返回</string>

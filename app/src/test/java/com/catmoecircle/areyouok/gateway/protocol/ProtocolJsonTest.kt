@@ -6,6 +6,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -559,5 +560,103 @@ class ProtocolJsonTest {
         assertEquals("abc", Topics.sessionIdOf("session:abc"))
         assertNull(Topics.sessionIdOf("workspaces"))
         assertNotNull(Intervention.fromEvent("id", null, null, null))
+    }
+
+    @Test
+    fun `team activity decodes contract payload`() {
+        val activity = GatewayJson.json.decodeFromString<TeamActivity>(
+            """
+            {"ok":true,"sessionId":"session-root","updatedAt":1760000000000,
+             "team":{"enabled":true,"failure":null,"tasks":[
+               {"id":"task-1","subject":"网关实现 activity 端点","status":"in_progress",
+                "ownerId":"session-x","ownerName":"lead/gateway-dev","revision":3}]},
+             "subagents":[{"id":"session-child","parentSessionId":"session-root","title":"gateway-dev",
+                           "running":true,"updatedAt":1760000000000,"model":"deepseek-v4.1-flash",
+                           "reasoningEffort":"high","depth":1,"unknownField":"ignored"}],
+             "jobs":[{"id":"bash-0123456789abcdef","sessionId":"session-child","kind":"bash",
+                      "label":"npm test\nnpm run build","status":"running","detail":null,
+                      "startedAt":1760000000000,"finishedAt":null,"subagent":true}]}
+            """.trimIndent(),
+        )
+
+        assertEquals("session-root", activity.sessionId)
+        assertEquals(1760000000000L, activity.updatedAt)
+        // 团队任务板：裁剪视图 + 进行中/待处理计数。
+        assertEquals(true, activity.team?.enabled)
+        assertEquals(1, activity.team?.tasks?.size)
+        assertEquals(true, activity.team?.tasks?.single()?.isInProgress)
+        assertEquals(1, activity.inProgressTasks)
+        assertEquals(0, activity.pendingTasks)
+        // 子智能体：空标题之外全部按契约字段落位（未知字段被忽略）。
+        assertEquals(1, activity.runningSubagents)
+        val subagent = activity.subagents.single()
+        assertEquals("session-child", subagent.id)
+        assertEquals("session-root", subagent.parentSessionId)
+        assertEquals("gateway-dev", subagent.displayTitle)
+        assertEquals("deepseek-v4.1-flash", subagent.model)
+        assertEquals(1, subagent.depth)
+        // 后台任务：label 可能是多行命令，只取首行。
+        val job = activity.jobs.single()
+        assertEquals("npm test", job.firstLineLabel)
+        assertEquals(true, job.isRunning)
+        assertFalse(job.isSettled)
+        assertTrue(job.subagent)
+        assertEquals(1, activity.runningJobs)
+        assertFalse(activity.isEmpty)
+    }
+
+    @Test
+    fun `team activity tolerates old gateways and settled jobs`() {
+        // 旧网关/空会话：只有 ok，其它字段缺省不应崩。
+        val empty = GatewayJson.json.decodeFromString<TeamActivity>("""{"ok":true}""")
+        assertNull(empty.sessionId)
+        assertNull(empty.team)
+        assertTrue(empty.subagents.isEmpty())
+        assertTrue(empty.jobs.isEmpty())
+        assertTrue(empty.isEmpty)
+
+        // agentTeam 投影只有 enabled/failure（旧 DSH 没 tasks）：默认空列表，旧字段保留。
+        val summary = GatewayJson.json.decodeFromString<SessionSummary>(
+            """{"sessionId":"s1","projections":{"values":{"agentTeam":{"enabled":true,"failure":"stale"}}}}""",
+        )
+        assertEquals(true, summary.teamEnabled)
+        assertEquals("stale", summary.projections?.values?.agentTeam?.failure)
+        assertTrue(summary.projections?.values?.agentTeam?.tasks.isNullOrEmpty())
+
+        // 已结算 job：弱化显示，空 label 回退 id 前 8 位。
+        val settled = GatewayJson.json.decodeFromString<ActivityJob>(
+            """{"id":"job-1","kind":"bash","label":"","status":"completed","startedAt":1,"finishedAt":2}""",
+        )
+        assertTrue(settled.isSettled)
+        assertFalse(settled.isRunning)
+        assertEquals("job-1", settled.firstLineLabel)
+
+        // 失败状态与未知状态都能安全渲染。
+        assertTrue(
+            GatewayJson.json.decodeFromString<ActivityJob>("""{"status":"failed"}""").isFailed,
+        )
+        assertFalse(
+            GatewayJson.json.decodeFromString<ActivityJob>("""{"status":"weird"}""").isRunning,
+        )
+    }
+
+    @Test
+    fun `subagent mode decodes and preview address falls back to unknown`() {
+        val subagent = GatewayJson.json.decodeFromString<ActivitySubagent>(
+            """{"id":"child-1","parentSessionId":"root-1","mode":"one-shot","running":true}""",
+        )
+        assertEquals(ActivitySubagent.MODE_ONE_SHOT, subagent.mode)
+        assertEquals("root-1" to "one-shot", subagent.previewAddress())
+
+        // 旧网关没有 mode：回退 unknown（DSH 对 unknown 的自愈路径）。
+        val legacy = GatewayJson.json.decodeFromString<ActivitySubagent>(
+            """{"id":"child-2","parentSessionId":"root-1"}""",
+        )
+        assertNull(legacy.mode)
+        assertEquals("root-1" to ActivitySubagent.MODE_UNKNOWN, legacy.previewAddress())
+
+        // 没有父会话：无法构造 subagent 地址，不打开预览（而不是拿子代理 id 走主聊天地址）。
+        assertNull(ActivitySubagent(id = "child-3").previewAddress())
+        assertNull(ActivitySubagent(id = "child-4", parentSessionId = "   ").previewAddress())
     }
 }

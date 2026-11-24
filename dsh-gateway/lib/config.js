@@ -20,6 +20,7 @@ export const DEFAULTS = Object.freeze({
   mdns: true,
   lanRequirePairing: false,
   publicUrl: '',
+  qrEmbedCertificate: false,
   maxDevices: 4,
   approvalTtlMs: 1_800_000,
   ringSize: 2000,
@@ -45,6 +46,8 @@ export const Config = z.object({
   mdns: z.boolean().default(DEFAULTS.mdns).description('是否广播 _dshgw._tcp'),
   lanRequirePairing: z.boolean().default(DEFAULTS.lanRequirePairing).description('局域网也要求设备令牌'),
   publicUrl: z.string().default(DEFAULTS.publicUrl).description('手动指定公网基址，如 https://[2408::1]:7789'),
+  qrEmbedCertificate: z.boolean().default(DEFAULTS.qrEmbedCertificate)
+    .description('公网配对二维码是否内嵌完整证书（默认只带指纹：码更疏、更好扫）'),
   maxDevices: z.natural().default(DEFAULTS.maxDevices).description('同时在线设备上限'),
   approvalTtlMs: z.natural().default(DEFAULTS.approvalTtlMs).description('待审批在插件侧保留时长'),
   ringSize: z.natural().default(DEFAULTS.ringSize).description('事件 ring 保留条数'),
@@ -83,6 +86,9 @@ export function resolveConfig(raw) {
     ? DEFAULTS.lanRequirePairing
     : Boolean(input.lanRequirePairing)
   config.publicUrl = typeof input.publicUrl === 'string' ? input.publicUrl.trim() : ''
+  config.qrEmbedCertificate = input.qrEmbedCertificate === undefined
+    ? DEFAULTS.qrEmbedCertificate
+    : Boolean(input.qrEmbedCertificate)
   config.maxDevices = intOf(input.maxDevices, DEFAULTS.maxDevices, 1, 64)
   config.approvalTtlMs = intOf(input.approvalTtlMs, DEFAULTS.approvalTtlMs, 1_000, 86_400_000)
   config.ringSize = intOf(input.ringSize, DEFAULTS.ringSize, 16, 100_000)

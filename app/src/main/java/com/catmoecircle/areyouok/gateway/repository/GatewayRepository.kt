@@ -1,5 +1,6 @@
 package com.catmoecircle.areyouok.gateway.repository
 
+import com.catmoecircle.areyouok.gateway.protocol.ActivitySubagent
 import com.catmoecircle.areyouok.gateway.protocol.EventFrame
 import com.catmoecircle.areyouok.gateway.protocol.EventKind
 import com.catmoecircle.areyouok.gateway.protocol.GatewayJson
@@ -17,6 +18,7 @@ import com.catmoecircle.areyouok.gateway.protocol.QuestionAnswer
 import com.catmoecircle.areyouok.gateway.protocol.SendMessageRequest
 import com.catmoecircle.areyouok.gateway.protocol.ServerEvent
 import com.catmoecircle.areyouok.gateway.protocol.SessionSummary
+import com.catmoecircle.areyouok.gateway.protocol.TeamActivity
 import com.catmoecircle.areyouok.gateway.protocol.Topics
 import com.catmoecircle.areyouok.gateway.protocol.TranslationProvidersResponse
 import com.catmoecircle.areyouok.gateway.protocol.Workspace
@@ -51,6 +53,33 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.builtins.ListSerializer
+
+/**
+ * 子智能体对话的只读预览（点右侧团队面板里的子代理打开）。
+ *
+ * 与主聊天完全隔离：不改 `selectedSessionId` / `messages` / `sessionRunning`，
+ * 所以子代理会话不会被当成主会话（浏览它时也无法发消息）。
+ * 消息复用主聊天同一套历史映射（工具卡 / 思考链 / 图片照常渲染）。
+ */
+data class SubagentPreview(
+    /** 子代理会话 id。 */
+    val sessionId: String,
+    /** 直接父会话 id：DSH `subagent` 地址必需。 */
+    val parentSessionId: String,
+    /** `one-shot` / `continuable` / `unknown`。 */
+    val mode: String?,
+    val title: String,
+    val running: Boolean,
+    val model: String? = null,
+    val messages: List<ChatMessage> = emptyList(),
+    /** 首屏加载中（没有消息时才显示整页进度）。 */
+    val loading: Boolean = false,
+    /** 最近一次刷新失败的用户文案；有旧消息时继续展示旧消息。 */
+    val error: String? = null,
+) {
+    val displayTitle: String
+        get() = title.takeIf { it.isNotBlank() } ?: sessionId.take(8)
+}
 
 /**
  * dsh-gateway 客户端状态机。
@@ -105,6 +134,23 @@ class GatewayRepository(
     /** 本机沙箱权限目录；网关未实现该端点时是空目录（UI 隐藏权限入口）。 */
     private val _permissionCatalog = MutableStateFlow(PermissionCatalog())
     val permissionCatalog: StateFlow<PermissionCatalog> = _permissionCatalog.asStateFlow()
+
+    /**
+     * 右侧「团队协作」面板的数据（`GET /v1/sessions/{id}/activity`）。
+     *
+     * 只在面板打开时由 UI 每 2s 触发 [refreshTeamActivity]；切会话 / 断开连接 / 连接出错时清空。
+     * null 表示「还没有数据」，面板显示空态。
+     */
+    private val _teamActivity = MutableStateFlow<TeamActivity?>(null)
+    val teamActivity: StateFlow<TeamActivity?> = _teamActivity.asStateFlow()
+
+    /** 网关没有 activity 端点（旧 dsh-gateway）：面板显示「不支持」提示而不是空转。 */
+    private val _teamActivityUnsupported = MutableStateFlow(false)
+    val teamActivityUnsupported: StateFlow<Boolean> = _teamActivityUnsupported.asStateFlow()
+
+    /** 子智能体只读预览；null 表示没打开。与主聊天的会话状态互不影响。 */
+    private val _subagentPreview = MutableStateFlow<SubagentPreview?>(null)
+    val subagentPreview: StateFlow<SubagentPreview?> = _subagentPreview.asStateFlow()
 
     /**
      * 思考链翻译状态（按 messageId 缓存，UI 直接按消息 id 查）。
@@ -172,6 +218,9 @@ class GatewayRepository(
     /** 已经就「网关不支持 turn.completed」提示过的 serverId（重连不刷屏）。 */
     private var turnCapabilityWarnedFor: String? = null
 
+    /** 上次团队活动刷新失败的错误文案（只在内容变化时 WARN 一次，避免 2s 轮询刷屏）。 */
+    private var teamActivityWarnKey: String? = null
+
     private val assembler = MessageAssembler()
 
     /**
@@ -224,6 +273,8 @@ class GatewayRepository(
         connectionJob = null
         transport.shutdown()
         lastEndpoint = endpoint
+        // 换网关后旧的团队活动数据不再可信。
+        clearTeamActivity()
         _connection.value = ConnectionState(
             phase = ConnectionPhase.CONNECTING,
             endpoint = endpoint,
@@ -249,6 +300,7 @@ class GatewayRepository(
                             attempt = attempt,
                             lastErrorAt = clock(),
                         )
+                        clearTeamActivity()
                         emitNotice(NoticeLevel.ERROR, "连接失败：$message")
                         return@launch
                     }
@@ -274,6 +326,7 @@ class GatewayRepository(
                     error = error.toUserMessage(),
                     lastErrorAt = clock(),
                 )
+                clearTeamActivity()
             }
         }
     }
@@ -288,6 +341,7 @@ class GatewayRepository(
         connectionJob = null
         historyJob?.cancel()
         transport.shutdown()
+        clearTeamActivity()
         _connection.value = ConnectionState(
             phase = ConnectionPhase.IDLE,
             endpoint = lastEndpoint,
@@ -861,6 +915,8 @@ class GatewayRepository(
         val previous = _selectedSessionId.value
         if (previous != null) transport.unsubscribe(Topics.session(previous))
         _selectedSessionId.value = sessionId
+        // 团队活动是「当前会话树」的快照：切会话必须清空，不能让上一个会话的子智能体/任务串台。
+        clearTeamActivity()
         // 之前选中的空白会话不再是「当前会话」，从侧边栏隐藏（DSH 桌面端同样只留当前空白会话）。
         _sessions.value = _sessions.value.filterNot { it.isBlank && it.id != sessionId }
         historyJob?.cancel()
@@ -1203,6 +1259,131 @@ class GatewayRepository(
         }
     }
 
+    /**
+     * 拉一次当前会话的团队活动（右侧面板打开期间由 UI 每 2s 调用）。
+     *
+     * 语义按契约 `docs/team-activity-panel.md` §3.3：
+     * - 没有选中会话 / 还没连上网关：直接返回，不发请求；
+     * - 成功：更新 [teamActivity]，并清掉「旧网关」标记；
+     * - 降级情况（旧网关没有该端点：404 `not_found` 或 `unsupported`）：只置标记，
+     *   不弹 toast —— 每 2s 一条会很吵；
+     * - 其它失败：保留旧值，且只在错误内容变化时 WARN 一次（网络抖动不该让面板闪空）；
+     * - CancellationException 原样抛出（协程取消不能被吞掉）。
+     */
+    suspend fun refreshTeamActivity() {
+        val sessionId = _selectedSessionId.value ?: return
+        if (_connection.value.endpoint == null) return
+        try {
+            val activity = transport.api.sessionActivity(sessionId)
+            // 请求期间用户切走了：这份数据属于上一个会话，丢掉。
+            if (_selectedSessionId.value != sessionId) return
+            _teamActivity.value = activity
+            _teamActivityUnsupported.value = false
+            teamActivityWarnKey = null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            if (_selectedSessionId.value != sessionId) return
+            // 旧网关对「没有该路由」回 HTTP 404 + code not_found（不是 unsupported），
+            // 新网关的未知会话也是 404；两者都按降级处理：显示「升级网关」提示，
+            // 不要每 2s 弹一条「资源不存在或已结束」的 WARN。
+            val degraded = error is GatewayException &&
+                (error.code == GatewayException.CODE_UNSUPPORTED || error.isNotFound)
+            _teamActivityUnsupported.value = degraded
+            if (degraded) return
+            val key = error.toUserMessage()
+            if (key != teamActivityWarnKey) {
+                teamActivityWarnKey = key
+                emitNotice(NoticeLevel.WARN, "团队活动刷新失败：$key")
+            }
+        }
+    }
+
+    /** 清空团队活动面板数据（切会话 / 断开 / 连接出错时调用）。 */
+    private fun clearTeamActivity() {
+        _teamActivity.value = null
+        _teamActivityUnsupported.value = false
+        teamActivityWarnKey = null
+        // 预览属于同一个会话树：切会话/断开时一并关闭，不退回到一个别的会话的子代理。
+        _subagentPreview.value = null
+    }
+
+    /**
+     * 打开某个子智能体的只读对话预览。
+     *
+     * 没有父会话（无法构造 DSH subagent 地址）时什么都不做：宁可不打开，
+     * 也不要拿子代理 id 走主聊天地址被网关 502。
+     */
+    suspend fun openSubagentPreview(agent: ActivitySubagent) {
+        val address = agent.previewAddress() ?: return
+        _subagentPreview.value = SubagentPreview(
+            sessionId = agent.id,
+            parentSessionId = address.first,
+            mode = address.second,
+            title = agent.title,
+            running = agent.running,
+            model = agent.model,
+            loading = true,
+        )
+        loadSubagentPreviewPage()
+    }
+
+    /**
+     * 刷新只读预览（打开期间每 2s）：拉最新一页（limit 100）。
+     *
+     * 失败保留旧消息、只把错误文案放到 [SubagentPreview.error]；顺便刷新团队活动，
+     * 让返回面板时看到的是最新的子代理/任务状态。
+     */
+    suspend fun refreshSubagentPreview() {
+        if (_subagentPreview.value == null) return
+        loadSubagentPreviewPage()
+        refreshTeamActivity()
+        syncSubagentPreviewFromActivity()
+    }
+
+    /** 关闭只读预览（返回团队面板 / 切会话 / 断开连接时调用）。 */
+    fun closeSubagentPreview() {
+        _subagentPreview.value = null
+    }
+
+    private suspend fun loadSubagentPreviewPage() {
+        val preview = _subagentPreview.value ?: return
+        try {
+            val page = transport.api.messages(
+                sessionId = preview.sessionId,
+                limit = SUBAGENT_PREVIEW_LIMIT,
+                parentSessionId = preview.parentSessionId,
+                mode = preview.mode,
+            )
+            // 请求期间用户关掉/换了一个子代理：这份数据不要了。
+            if (_subagentPreview.value?.sessionId != preview.sessionId) return
+            _subagentPreview.value = preview.copy(
+                messages = page.messages.toHistoryChatMessages(),
+                loading = false,
+                error = null,
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            if (_subagentPreview.value?.sessionId != preview.sessionId) return
+            _subagentPreview.value = preview.copy(
+                loading = false,
+                error = error.toUserMessage(),
+            )
+        }
+    }
+
+    /** 用最新的团队活动同步预览头的「运行中 / 标题 / 模型」（活动里没有就保持原样）。 */
+    private fun syncSubagentPreviewFromActivity() {
+        val preview = _subagentPreview.value ?: return
+        val agent = _teamActivity.value?.subagents?.firstOrNull { it.id == preview.sessionId } ?: return
+        _subagentPreview.value = preview.copy(
+            running = agent.running,
+            title = agent.title,
+            model = agent.model,
+        )
+    }
+
     /** 乐观更新：只替换目标会话的 `permissions.currentValue`，其余字段保留。 */
     private fun applyPermissionPreset(sessionId: String, preset: String) {
         _sessions.value = _sessions.value.map { session ->
@@ -1461,6 +1642,9 @@ class GatewayRepository(
 
         /** 向上翻页时每次加载的更早历史条数。 */
         const val OLDER_HISTORY_LIMIT = 100
+
+        /** 子智能体只读预览每次拉取的条数（只显示最新一页，不做上翻）。 */
+        private const val SUBAGENT_PREVIEW_LIMIT = 100
 
         /**
          * 打开会话时静默向前翻页，补齐「最后一段工作」的起点；最多翻这么多页，

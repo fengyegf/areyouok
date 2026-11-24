@@ -42,6 +42,7 @@ import {
   formatHost,
   normalizePairingMode,
   pairingUri,
+  preferStable,
 } from './panel.js'
 import { filesOfContent, imagesOfContent } from './normalize.js'
 import {
@@ -56,7 +57,7 @@ import { certificateBase64Url, formatFingerprint } from './tls.js'
 export const DSH_VERSION = '0.2.2-rc.1'
 
 /** Gateway package version (kept in sync with package.json by hand). */
-export const GATEWAY_VERSION = '0.2.2'
+export const GATEWAY_VERSION = '0.2.4'
 
 /** `/v1` protocol version. */
 export const PROTOCOL_VERSION = 1
@@ -72,6 +73,18 @@ const DEFAULT_MESSAGE_LIMIT = 50
 
 /** Hard page size cap. */
 const MAX_MESSAGE_LIMIT = 200
+
+/** 活动面板：子智能体上限（契约 docs/team-activity-panel.md §2.1）。 */
+const ACTIVITY_SUBAGENT_LIMIT = 50
+
+/** 活动面板：后台任务上限（契约 §2.1）。 */
+const ACTIVITY_JOB_LIMIT = 50
+
+/** 活动面板：子代理树 BFS 的会话硬上限（防御异常数据把 CPU 拉满）。 */
+const ACTIVITY_MAX_TREE_NODES = 500
+
+/** DSH subagentCatalog 的子代理模式；external 没有本地子会话，不会出现在 activity 里。 */
+const SUBAGENT_MODE_VALUES = new Set(['one-shot', 'continuable', 'unknown'])
 
 /** Preset value shape accepted by `/v1/sessions/{id}/permission` (`[a-z0-9-]+`). */
 const PRESET_VALUE_PATTERN = /^[a-z0-9-]+$/
@@ -127,6 +140,7 @@ const ROUTES = [
   ['POST', /^\/v1\/sessions\/([^/]+)\/model$/, 'sessionModel'],
   ['POST', /^\/v1\/sessions\/([^/]+)\/permission$/, 'sessionPermission'],
   ['POST', /^\/v1\/sessions\/([^/]+)\/team$/, 'sessionTeam'],
+  ['GET', /^\/v1\/sessions\/([^/]+)\/activity$/, 'sessionActivity'],
   ['GET', /^\/v1\/models$/, 'models'],
   ['GET', /^\/v1\/permissions$/, 'permissions'],
   ['GET', /^\/v1\/interventions$/, 'interventions'],
@@ -159,6 +173,31 @@ function decodeSegment(value) {
   } catch {
     throw new HttpError(400, 'invalid_request', 'malformed path parameter')
   }
+}
+
+/**
+ * session/events 的 address：子代理会话必须用 subagent 变体，普通会话用 session 变体。
+ *
+ * DSH SessionAddress 联合类型（dsh-api-session-controller 的 session/events 参数
+ * schema）= {kind:'session',sessionId} |
+ * {kind:'subagent',parentSessionId,childSessionId,mode:'one-shot'|'continuable'|'unknown'}。
+ * 子代理 id 走普通 session 地址会被宿主拒绝（网关回 502），这是 DSH 的地址校验。
+ *
+ * 规则（契约 §5.1）：parent 与 mode 同时给出才切 subagent 地址；缺任一个按旧行为走
+ * session 地址；mode 非法直接 400 invalid_request。
+ *
+ * @param {string} sessionId - 目标会话（子代理时是 childSessionId）。
+ * @param {URL} url - 请求 URL（读 parent / mode query）。
+ * @returns {{kind:string, sessionId?:string, parentSessionId?:string, childSessionId?:string, mode?:string}}
+ */
+function messageAddressOf(sessionId, url) {
+  const parentSessionId = String(url.searchParams.get('parent') ?? '').trim()
+  const mode = String(url.searchParams.get('mode') ?? '').trim()
+  if (mode !== '' && !SUBAGENT_MODE_VALUES.has(mode)) {
+    throw new HttpError(400, 'invalid_request', 'mode must be one of one-shot, continuable, unknown')
+  }
+  if (parentSessionId === '' || mode === '') return { kind: 'session', sessionId }
+  return { kind: 'subagent', parentSessionId, childSessionId: sessionId, mode }
 }
 
 /**
@@ -258,6 +297,188 @@ function catalogPresetValues(catalog) {
     if (typeof option.value === 'string' && option.value !== '') values.push(option.value)
   }
   return values
+}
+
+// ---------------------------------------------------------------------------
+// 团队活动面板（GET /v1/sessions/{id}/activity）整形
+//
+// 只做「读 hub 缓存 + 裁剪成契约字段」，不发任何 DSH RPC：面板打开期间 2s 轮询
+// 一次，不能让手机把 PC 的回环 RPC 打爆。
+// ---------------------------------------------------------------------------
+
+/** 宽松取字符串（非字符串一律 ''）。 */
+function textOf(value) {
+  return typeof value === 'string' ? value : ''
+}
+
+/** 宽松取有限数字，缺省 null。 */
+function numOf(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/** 会话标题：顶层 title，否则 projections.values.title，否则 ''。 */
+function activityTitleOf(summary) {
+  const title = textOf(summary?.title)
+  if (title !== '') return title
+  const values = summary?.projections?.values
+  return values !== null && typeof values === 'object' ? textOf(values.title) : ''
+}
+
+/**
+ * 会话当前模型路由。
+ *
+ * DSH modelSelection 投影的 wire 视图是 {lastUsed, next}
+ * （dsh-agent/src/model-selection.ts），旧笔记里写的是 current：三者都兜一遍，
+ * 读不到就是 {model:null, reasoningEffort:null}。
+ */
+function activityModelOf(summary) {
+  const values = summary?.projections?.values
+  const selection = values !== null && typeof values === 'object' ? values.modelSelection : null
+  if (selection === null || typeof selection !== 'object') return { model: null, reasoningEffort: null }
+  for (const candidate of [selection.current, selection.next, selection.lastUsed]) {
+    if (candidate === null || typeof candidate !== 'object') continue
+    const model = textOf(candidate.model)
+    if (model === '') continue
+    const effort = textOf(candidate.reasoningEffort)
+    return { model, reasoningEffort: effort === '' ? null : effort }
+  }
+  return { model: null, reasoningEffort: null }
+}
+
+/**
+ * 根会话 agentTeam 投影的裁剪视图。
+ *
+ * 没有该投影（旧 DSH / 非根会话）→ null。tasks 去掉 deleted（投影侧已过滤，
+ * 这里再兜一次）并只保留面板要展示的字段；ownerId/ownerName 缺省为 null。
+ */
+function activityTeamOf(root) {
+  const values = root?.projections?.values
+  const team = values !== null && typeof values === 'object' ? values.agentTeam : null
+  if (team === null || typeof team !== 'object') return null
+  const rawTasks = Array.isArray(team.tasks) ? team.tasks : []
+  const tasks = []
+  for (const task of rawTasks) {
+    if (task === null || typeof task !== 'object') continue
+    const id = textOf(task.id)
+    if (id === '') continue
+    const status = textOf(task.status)
+    if (status === '' || status === 'deleted') continue
+    tasks.push({
+      id,
+      subject: textOf(task.subject),
+      status,
+      ownerId: textOf(task.ownerId) || null,
+      ownerName: textOf(task.ownerName) || null,
+      revision: numOf(task.revision) ?? 0,
+    })
+  }
+  const failure = textOf(team.failure)
+  return { enabled: team.enabled === true, failure: failure === '' ? null : failure, tasks }
+}
+
+/**
+ * 子代理模式：用直接父会话的 subagentCatalog 投影按子会话 id 匹配。
+ *
+ * DSH 的 catalog 是父会话上的 projections.values.subagentCatalog
+ * （SubagentCatalogEntry[] = {id, createdAt, mode:'one-shot'|'external'|'continuable'|'unknown',
+ * label?, name?}）。父会话没有该投影、匹配不到、或模式是 external 时回退 'unknown'。
+ *
+ * @param {object|undefined} parentSummary - 子代理的直接父会话摘要。
+ * @param {string} childId - 子会话 id。
+ * @returns {'one-shot'|'continuable'|'unknown'}
+ */
+function activitySubagentModeOf(parentSummary, childId) {
+  if (childId === '') return 'unknown'
+  const values = parentSummary?.projections?.values
+  const catalog = values !== null && typeof values === 'object' ? values.subagentCatalog : null
+  if (!Array.isArray(catalog)) return 'unknown'
+  for (const entry of catalog) {
+    if (entry === null || typeof entry !== 'object') continue
+    if (textOf(entry.id) !== childId) continue
+    const mode = textOf(entry.mode)
+    return SUBAGENT_MODE_VALUES.has(mode) ? mode : 'unknown'
+  }
+  return 'unknown'
+}
+
+/**
+ * 按 parentSessionId 自根向下 BFS，收集根会话的全部后代会话与深度。
+ *
+ * @param {object[]} sessions - hub.getSessions() 的摘要快照。
+ * @param {string} rootId - 根会话 id。
+ * @returns {{root: object|null, nodes: Array<{summary: object, depth: number}>, byId: Map<string, object>}}
+ *   root === null 表示 hub 里没有这个会话（调用方回 404）。
+ */
+function activityTreeOf(sessions, rootId) {
+  const byId = new Map()
+  for (const summary of sessions) {
+    if (summary === null || typeof summary !== 'object') continue
+    const sessionId = textOf(summary.sessionId)
+    if (sessionId !== '') byId.set(sessionId, summary)
+  }
+  const root = byId.get(rootId)
+  if (root === undefined) return { root: null, nodes: [], byId }
+
+  const children = new Map()
+  for (const summary of byId.values()) {
+    const parentId = textOf(summary.parentSessionId)
+    if (parentId === '') continue
+    const bucket = children.get(parentId)
+    if (bucket === undefined) children.set(parentId, [summary])
+    else bucket.push(summary)
+  }
+
+  const nodes = []
+  const visited = new Set([rootId])
+  let frontier = [{ id: rootId, depth: 0 }]
+  while (frontier.length > 0) {
+    const next = []
+    for (const node of frontier) {
+      const kids = children.get(node.id)
+      if (kids === undefined) continue
+      for (const kid of kids) {
+        const kidId = textOf(kid.sessionId)
+        if (kidId === '' || visited.has(kidId)) continue
+        visited.add(kidId)
+        nodes.push({ summary: kid, depth: node.depth + 1 })
+        next.push({ id: kidId, depth: node.depth + 1 })
+        if (nodes.length >= ACTIVITY_MAX_TREE_NODES) return { root, nodes, byId }
+      }
+    }
+    frontier = next
+  }
+  return { root, nodes, byId }
+}
+
+/** 一条后代会话 → subagents[] 条目。 */
+function activitySubagentOf(summary, depth, mode) {
+  const model = activityModelOf(summary)
+  return {
+    id: textOf(summary.sessionId),
+    parentSessionId: textOf(summary.parentSessionId) || null,
+    mode: SUBAGENT_MODE_VALUES.has(mode) ? mode : 'unknown',
+    title: activityTitleOf(summary),
+    running: summary.running === true,
+    updatedAt: numOf(summary.updatedAt),
+    model: model.model,
+    reasoningEffort: model.reasoningEffort,
+    depth,
+  }
+}
+
+/** 一条 tracked job → jobs[] 条目（subagent = owner 是否为子会话）。 */
+function activityJobOf(job, rootId) {
+  return {
+    id: textOf(job.jobId),
+    sessionId: textOf(job.sessionId),
+    kind: textOf(job.kind),
+    label: textOf(job.label),
+    status: textOf(job.status),
+    detail: textOf(job.detail) || null,
+    startedAt: numOf(job.startedAt) ?? 0,
+    finishedAt: numOf(job.finishedAt),
+    subagent: textOf(job.sessionId) !== rootId,
+  }
 }
 
 /**
@@ -488,9 +709,10 @@ export class ApiServer {
    * @param {{key:string,cert:string,fingerprint:string}|null} [deps.tls]
    * @param {string} [deps.dir]
    * @param {import('./translate.js').TranslationService} [deps.translate]
+   * @param {import('./activity.js').ActivityTracker} [deps.activity]
    * @param {(req:any,socket:any,head:Buffer)=>void} [deps.onUpgrade]
    */
-  constructor({ ctx, config, logger, hub, auth, tls, dir, translate, onUpgrade }) {
+  constructor({ ctx, config, logger, hub, auth, tls, dir, translate, activity, onUpgrade }) {
     this.ctx = ctx ?? null
     this.config = config ?? {}
     this.logger = logger ?? {}
@@ -498,6 +720,8 @@ export class ApiServer {
     this.auth = auth
     /** Anonymous translation backend (may be null in minimal test wiring). */
     this.translate = translate ?? null
+    /** Background job tracker for the team activity panel (may be null in minimal test wiring). */
+    this.activity = activity ?? null
     this.tls = tls ?? null
     this.dir = typeof dir === 'string' ? dir : ''
     this.onUpgrade = typeof onUpgrade === 'function' ? onUpgrade : null
@@ -525,6 +749,16 @@ export class ApiServer {
     this.overrides = { lanRequirePairing: null, mdns: null }
     /** Optional mDNS advertiser injected by index.js for status reporting. */
     this.mdns = null
+    /**
+     * Public addresses advertised on the previous pass.
+     *
+     * Interfaces come and go (Wi-Fi reconnect, a proxy TUN adapter appearing, a
+     * rotating IPv6 privacy address). Remembering the previous pick keeps the
+     * pairing view and the QR content stable instead of flipping between two
+     * usable addresses on every poll.
+     * @type {string[]}
+     */
+    this.advertisedPublic = []
   }
 
   /** Both listeners in `[lanServer, publicServer]` order (null when disabled). */
@@ -876,13 +1110,28 @@ export class ApiServer {
     }
   }
 
+  /** Read the tracker without letting an activity bug break the HTTP edge. */
+  #activityJobs(sessionIds) {
+    try {
+      const fn = this.activity?.jobsInSessionIds
+      if (typeof fn !== 'function') return []
+      const value = fn.call(this.activity, sessionIds)
+      return Array.isArray(value) ? value : []
+    } catch (error) {
+      this.logger.debug?.('activity jobs failed: ' + (error?.message ?? error))
+      return []
+    }
+  }
+
   /** Advertised public base URLs (config override first; public addresses only). */
   #publicUrls() {
     const urls = []
     const configured = normalizeOrigin(this.config.publicUrl ?? '')
     if (configured !== '') urls.push(configured)
     if (this.publicPort > 0) {
-      for (const address of enumerateAddresses().public) {
+      const addresses = preferStable(enumerateAddresses().public, this.advertisedPublic)
+      this.advertisedPublic = addresses
+      for (const address of addresses) {
         const url = `https://${formatHost(address)}:${this.publicPort}`
         if (!urls.includes(url)) urls.push(url)
       }
@@ -1064,10 +1313,12 @@ export class ApiServer {
     const beforeSeq = intParam(url.searchParams.get('beforeSeq'), null, 1)
     const limit = intParam(url.searchParams.get('limit'), DEFAULT_MESSAGE_LIMIT, 1, MAX_MESSAGE_LIMIT)
     const includeRaw = url.searchParams.get('raw') === '1'
+    // 子代理会话要带 parent + mode 才会切到 DSH 的 subagent 地址（见契约 §5.1）。
+    const address = messageAddressOf(sessionId, url)
     let page
     let history = []
     try {
-      const args = { address: { kind: 'session', sessionId }, maxMessages: limit }
+      const args = { address, maxMessages: limit }
       if (beforeSeq !== null) args.beforeSeq = beforeSeq
       page = await this.#dsh().call('session/events', { request: args })
       const records = Array.isArray(page?.records) ? page.records : []
@@ -1412,6 +1663,61 @@ export class ApiServer {
     writeJson(res, 200, { ok: true, sessionId, enabled })
   }
 
+  /**
+   * GET /v1/sessions/{id}/activity
+   *
+   * 团队协作面板的数据源：根会话的 agentTeam 投影 + 子智能体会话树
+   * （parentSessionId BFS，depth 从 1 起）+ 树内后台任务。
+   *
+   * 数据全部来自 hub 缓存与 {@link import('./activity.js').ActivityTracker} 的
+   * 内存追踪，不调用 DSH：面板打开期间每 2s 轮询一次，不能让手机把 PC 的
+   * 回环 RPC 打爆。未知会话 404 not_found。
+   */
+  hSessionActivity({ res, params }) {
+    const rootId = decodeSegment(params[0])
+    const sessions = this.#hubCall('getSessions') ?? []
+    const tree = activityTreeOf(Array.isArray(sessions) ? sessions : [], rootId)
+    if (tree.root === null) throw new HttpError(404, 'not_found', 'unknown session')
+
+    const subagents = tree.nodes
+      .map((node) => {
+        const childId = textOf(node.summary.sessionId)
+        const parentId = textOf(node.summary.parentSessionId)
+        return activitySubagentOf(node.summary, node.depth, activitySubagentModeOf(tree.byId.get(parentId), childId))
+      })
+      .filter((entry) => entry.id !== '')
+      .sort((left, right) => {
+        if (left.running !== right.running) return left.running ? -1 : 1
+        return (right.updatedAt ?? 0) - (left.updatedAt ?? 0)
+      })
+      .slice(0, ACTIVITY_SUBAGENT_LIMIT)
+
+    // job 的 owner 可以是树里任意会话，不只是被截断的前 50 个子代理。
+    const treeIds = new Set([rootId])
+    for (const node of tree.nodes) {
+      const id = textOf(node.summary.sessionId)
+      if (id !== '') treeIds.add(id)
+    }
+    const jobs = this.#activityJobs(treeIds)
+      .map((job) => activityJobOf(job, rootId))
+      .sort((left, right) => {
+        const leftRunning = left.finishedAt === null
+        const rightRunning = right.finishedAt === null
+        if (leftRunning !== rightRunning) return leftRunning ? -1 : 1
+        return right.startedAt - left.startedAt
+      })
+      .slice(0, ACTIVITY_JOB_LIMIT)
+
+    writeJson(res, 200, {
+      ok: true,
+      sessionId: rootId,
+      updatedAt: numOf(tree.root.updatedAt) ?? 0,
+      team: activityTeamOf(tree.root),
+      subagents,
+      jobs,
+    })
+  }
+
   hInterventions({ res, url }) {
     const status = url.searchParams.get('status') ?? 'pending'
     let interventions = this.#hubCall('listInterventions', [status]) ?? []
@@ -1548,6 +1854,7 @@ export class ApiServer {
       devices: this.auth?.devices?.() ?? [],
       pairing: this.auth?.currentPairing?.() ?? null,
       certificate: this.#certificate(),
+      embedCertificate: config.qrEmbedCertificate === true,
       config,
       publicUrls,
       lanUrls,
@@ -1577,6 +1884,7 @@ export class ApiServer {
       name: this.effectiveConfig().name,
       mode: selected,
       certificate: this.#certificate(),
+      embedCertificate: this.effectiveConfig().qrEmbedCertificate === true,
     })
   }
 
@@ -1595,6 +1903,7 @@ export class ApiServer {
       name: this.effectiveConfig().name,
       mode: selected,
       certificate: this.#certificate(),
+      embedCertificate: this.effectiveConfig().qrEmbedCertificate === true,
     })
     this.logger.info?.(`pairing code created (mode=${selected}, ttl=${Math.round((pairing.expiresAt - Date.now()) / 1000)}s, urls=${urls.length})`)
     return view

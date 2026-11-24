@@ -196,14 +196,160 @@ data class SessionPermissions(
  * DSH `agentTeam` 投影：根会话的「智能体团队协作」开关状态。
  *
  * 来自 DSH 0.2.2-rc 的 `session.projections.values.agentTeam`，形状
- * `{enabled: Boolean, tasks: [...], failure?: String}`。客户端只需要 [enabled]，
- * 任务板内容与 [failure] 只保留字段以便将来展示（当前 UI 不消费）。
+ * `{enabled: Boolean, tasks: [...], failure?: String}`。侧边栏/输入框只需要 [enabled]，
+ * 右侧团队协作面板另外消费 [tasks]（裁剪视图，见 [TeamTaskBrief]）。
  */
 @Serializable
 data class SessionAgentTeam(
     val enabled: Boolean = false,
     val failure: String? = null,
+    /** 团队任务板（`TeamTaskView` 的裁剪视图）；旧网关/非根会话没有该字段时为空。 */
+    val tasks: List<TeamTaskBrief> = emptyList(),
 )
+
+/**
+ * 团队任务板的一行（DSH `TeamTaskView` 的裁剪视图，`GET /v1/sessions/{id}/activity` 返回）。
+ *
+ * 网关已经把 `deleted` 过滤掉，因此 [status] 只会是 pending / in_progress / completed；
+ * 仍然全部给默认值：网关演进时缺字段不应该让面板整页崩掉。
+ */
+@Serializable
+data class TeamTaskBrief(
+    val id: String = "",
+    val subject: String = "",
+    /** `pending` / `in_progress` / `completed`。 */
+    val status: String = "",
+    val ownerId: String? = null,
+    val ownerName: String? = null,
+    val revision: Long? = null,
+) {
+    val isPending: Boolean get() = status == STATUS_PENDING
+    val isInProgress: Boolean get() = status == STATUS_IN_PROGRESS
+    val isCompleted: Boolean get() = status == STATUS_COMPLETED
+
+    companion object {
+        const val STATUS_PENDING = "pending"
+        const val STATUS_IN_PROGRESS = "in_progress"
+        const val STATUS_COMPLETED = "completed"
+    }
+}
+
+/**
+ * 团队活动里的一路子智能体（根会话的后代会话，最多 50 条）。
+ *
+ * 网关按「运行中优先、其次 `updatedAt` 倒序」排好序，客户端按原序展示。
+ */
+@Serializable
+data class ActivitySubagent(
+    val id: String = "",
+    val parentSessionId: String? = null,
+    /** 会话标题；空串表示网关没给（UI 回退 id 前 8 位，与侧边栏一致）。 */
+    val title: String = "",
+    val running: Boolean = false,
+    /** 最后一次活动时间：面板用它算「运行中/空闲了多久」。 */
+    val updatedAt: Long? = null,
+    /** 模型 id（`projections.values.modelSelection.current`），可能为 null。 */
+    val model: String? = null,
+    val reasoningEffort: String? = null,
+    /** 从根会话算起的层级：直接子代理 = 1。 */
+    val depth: Int = 0,
+    /**
+     * DSH `subagentCatalog` 里的模式：`one-shot` / `continuable` / `unknown`。
+     *
+     * 读子代理历史时网关要把它塞进 `{kind:'subagent',mode}` 地址；旧网关没有该字段时为 null。
+     */
+    val mode: String? = null,
+) {
+    /** 展示标题：空标题回退会话 id 前 8 位。 */
+    val displayTitle: String
+        get() = title.takeIf { it.isNotBlank() } ?: id.take(8)
+
+    /**
+     * 只读预览需要的 DSH subagent address（直接父会话 id + 模式）。
+     *
+     * 没有 `parentSessionId` 时返回 null：DSH 只接受
+     * `{kind:'subagent',parentSessionId,childSessionId,mode}` 形式的地址，
+     * 缺父会话无法寻址（按普通会话地址会被 DSH 拒绝），宁可不打开也不要报错。
+     * 网关没给 `mode` 时回退 [MODE_UNKNOWN]（DSH 对 unknown 的自愈路径）。
+     */
+    fun previewAddress(): Pair<String, String>? {
+        val parent = parentSessionId?.takeIf { it.isNotBlank() } ?: return null
+        return parent to (mode?.takeIf { it.isNotBlank() } ?: MODE_UNKNOWN)
+    }
+
+    companion object {
+        const val MODE_ONE_SHOT = "one-shot"
+        const val MODE_CONTINUABLE = "continuable"
+        const val MODE_UNKNOWN = "unknown"
+    }
+}
+
+/** 团队活动里的一条后台任务（DSH `job`：bash / 脚本 / 子代理任务…）。 */
+@Serializable
+data class ActivityJob(
+    val id: String = "",
+    /** job 的 owner 会话 id：可能是根会话，也可能属于某个子会话。 */
+    val sessionId: String? = null,
+    val kind: String = "",
+    /** 命令/标签：可能是多行命令，UI 只取首行。 */
+    val label: String = "",
+    /** `running` / `stopping` / `completed` / `killed` / `failed`。 */
+    val status: String = "",
+    val detail: String? = null,
+    val startedAt: Long? = null,
+    /** 结算时间；运行中为 null。 */
+    val finishedAt: Long? = null,
+    /** owner 是否属于子会话（真正被委派出去执行的任务）。 */
+    val subagent: Boolean = false,
+) {
+    /** 还在跑（含正在停止）：状态点高亮、面板不弱化。 */
+    val isRunning: Boolean get() = status == STATUS_RUNNING || status == STATUS_STOPPING
+
+    /** 已结算（完成/终止/失败）：面板弱化显示（alpha 0.6）。 */
+    val isSettled: Boolean get() = !isRunning
+
+    val isFailed: Boolean get() = status == STATUS_FAILED
+
+    /** 首行标签：空 label 回退 id 前 8 位，避免出现只有状态点的空行。 */
+    val firstLineLabel: String
+        get() = label.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
+            ?: id.take(8)
+
+    companion object {
+        const val STATUS_RUNNING = "running"
+        const val STATUS_STOPPING = "stopping"
+        const val STATUS_COMPLETED = "completed"
+        const val STATUS_KILLED = "killed"
+        const val STATUS_FAILED = "failed"
+    }
+}
+
+/**
+ * `GET /v1/sessions/{id}/activity` 的响应（契约见 `docs/team-activity-panel.md` §2.1）。
+ *
+ * 一份响应同时喂满右侧面板的三个区：团队状态行（[team]）、子智能体（[subagents]）、
+ * 后台任务（[jobs]）。所有字段都给默认值并忽略未知字段：旧网关的响应/演进中的网关
+ * 都不应该让面板崩掉。
+ */
+@Serializable
+data class TeamActivity(
+    val ok: Boolean = true,
+    val sessionId: String? = null,
+    val updatedAt: Long? = null,
+    /** 根会话的团队投影裁剪视图；旧 DSH / 非根会话为 null（面板隐藏团队状态行）。 */
+    val team: SessionAgentTeam? = null,
+    val subagents: List<ActivitySubagent> = emptyList(),
+    val jobs: List<ActivityJob> = emptyList(),
+) {
+    val runningSubagents: Int get() = subagents.count { it.running }
+    val runningJobs: Int get() = jobs.count { it.isRunning }
+    val inProgressTasks: Int get() = team?.tasks.orEmpty().count { it.isInProgress }
+    val pendingTasks: Int get() = team?.tasks.orEmpty().count { it.isPending }
+
+    /** 三个区都没内容：面板显示空态。 */
+    val isEmpty: Boolean
+        get() = subagents.isEmpty() && jobs.isEmpty() && team?.tasks.isNullOrEmpty()
+}
 
 /** GET /v1/sessions/{id}/state：`state` 是 DSH 原样对象，客户端忽略。 */
 @Serializable

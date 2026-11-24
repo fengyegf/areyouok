@@ -29,6 +29,7 @@ import com.catmoecircle.areyouok.gateway.protocol.TranslationProvidersResponse
 import com.catmoecircle.areyouok.gateway.protocol.UploadFileResponse
 import com.catmoecircle.areyouok.gateway.protocol.SessionState
 import com.catmoecircle.areyouok.gateway.protocol.SessionSummary
+import com.catmoecircle.areyouok.gateway.protocol.TeamActivity
 import com.catmoecircle.areyouok.gateway.protocol.Workspace
 import java.net.URLEncoder
 import kotlinx.coroutines.Dispatchers
@@ -91,14 +92,38 @@ class OkHttpGatewayApi(
         return decodeOrThrow<SessionState>(text)
     }
 
+    /**
+     * GET /v1/sessions/{id}/activity：团队活动（子智能体 + 后台任务 + 任务板）。
+     *
+     * 鉴权、404/错误信封解析都复用 [get] + [parseError]；HTTP 200 + `{ok:false}`
+     * 的老式错误用 [throwIfNotOk] 翻成同一个 [GatewayException] 体系。
+     */
+    override suspend fun sessionActivity(sessionId: String): TeamActivity {
+        val text = get("/sessions/${pathSegment(sessionId)}/activity")
+        val response = decodeOrThrow<TeamActivity>(text)
+        throwIfNotOk(response.ok, text, "团队活动不可用")
+        return response
+    }
+
     override suspend fun messages(
         sessionId: String,
         beforeSeq: Long?,
         limit: Int?,
+        parentSessionId: String?,
+        mode: String?,
     ): MessagesPage {
         val query = buildMap {
             beforeSeq?.let { put("beforeSeq", it.toString()) }
             limit?.let { put("limit", it.toString()) }
+            // 子智能体只读预览：同时带 parent + mode 才切成 DSH 的 subagent address；
+            // 缺一个就按普通会话地址走（旧网关/旧 DSH 的旧行为）。编码交给 get() 的
+            // addQueryParameter（与其它查询参数同一套 URLEncoder 处理）。
+            val parent = parentSessionId?.takeIf { it.isNotBlank() }
+            val subagentMode = mode?.takeIf { it.isNotBlank() }
+            if (parent != null && subagentMode != null) {
+                put("parent", parent)
+                put("mode", subagentMode)
+            }
         }
         val text = get("/sessions/${pathSegment(sessionId)}/messages", query)
         return runCatching { decodeOrThrow<MessagesPage>(text) }

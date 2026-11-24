@@ -8,6 +8,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -215,6 +216,78 @@ class OkHttpGatewayApiTest {
         error as GatewayException
         assertEquals(GatewayException.CODE_DSH_UNAVAILABLE, error.code)
         assertEquals("dsh is not running", error.message)
+    }
+
+    @Test
+    fun `session activity hits the activity path and parses the contract payload`() = runTest {
+        val requests = mutableListOf<Request>()
+        val api = apiReturning(
+            200,
+            """{"ok":true,"sessionId":"s1","updatedAt":1760000000000,
+                "team":{"enabled":true,"tasks":[{"id":"task-1","status":"in_progress"}]},
+                "subagents":[{"id":"c1","title":"gateway-dev","running":true,"model":"m","depth":1}],
+                "jobs":[{"id":"bash-1","kind":"bash","label":"npm test","status":"running","startedAt":1}]}""",
+            requests,
+        )
+
+        val activity = api.sessionActivity("s1")
+
+        assertEquals("/v1/sessions/s1/activity", requests.single().url.encodedPath)
+        assertEquals("GET", requests.single().method)
+        assertEquals("s1", activity.sessionId)
+        assertEquals(1, activity.subagents.size)
+        assertEquals("gateway-dev", activity.subagents.single().displayTitle)
+        assertEquals(1, activity.jobs.size)
+        assertEquals(true, activity.jobs.single().isRunning)
+        assertEquals(1, activity.inProgressTasks)
+    }
+
+    @Test
+    fun `session activity maps a 404 envelope to not_found`() = runTest {
+        val api = apiReturning(
+            404,
+            """{"ok":false,"error":{"code":"not_found","message":"session not found"}}""",
+        )
+
+        val error = runCatching { api.sessionActivity("gone") }.exceptionOrNull()
+
+        assertTrue("expected GatewayException, got $error", error is GatewayException)
+        error as GatewayException
+        assertTrue(error.isNotFound)
+        assertEquals("session not found", error.message)
+    }
+
+    @Test
+    fun `session activity turns a 200 ok false envelope into an error`() = runTest {
+        val api = apiReturning(200, """{"ok":false,"error":{"code":"unsupported","message":"no activity"}}""")
+
+        val error = runCatching { api.sessionActivity("s1") }.exceptionOrNull()
+
+        assertTrue("expected GatewayException, got $error", error is GatewayException)
+        assertEquals(GatewayException.CODE_UNSUPPORTED, (error as GatewayException).code)
+    }
+
+    @Test
+    fun `messages carry parent and mode only for subagent previews`() = runTest {
+        val requests = mutableListOf<Request>()
+        val api = apiReturning(200, """{"ok":true,"messages":[]}""", requests)
+
+        api.messages("child-1", limit = 100, parentSessionId = "root-1", mode = "continuable")
+        api.messages("s1", limit = 100)
+        api.messages("child-2", limit = 100, parentSessionId = "root-1")
+
+        // 子代理预览：path 不变，额外带 parent + mode（DSH 据此切 subagent address）。
+        val subagent = requests[0].url
+        assertEquals("/v1/sessions/child-1/messages", subagent.encodedPath)
+        assertEquals("root-1", subagent.queryParameter("parent"))
+        assertEquals("continuable", subagent.queryParameter("mode"))
+        assertEquals("100", subagent.queryParameter("limit"))
+        // 普通会话：两个 query 都不出现，旧行为不变。
+        assertNull(requests[1].url.queryParameter("parent"))
+        assertNull(requests[1].url.queryParameter("mode"))
+        // 只给一个参数：按普通会话地址走（缺参退回 session address）。
+        assertNull(requests[2].url.queryParameter("parent"))
+        assertNull(requests[2].url.queryParameter("mode"))
     }
 
     companion object {
