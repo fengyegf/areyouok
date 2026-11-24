@@ -28,8 +28,26 @@
 -dontwarn kotlinx.coroutines.**
 
 # ---------------- ML Kit（barcode-scanning，内置模型） ----------------
-# ML Kit 的 AAR 自带 consumer 规则（模型入口与 native 绑定都在里面），业务侧不用
-# 再 keep；它引用的 Play Services 可选类在离线打包时并不存在，压掉这些告警即可。
+# ML Kit 的 AAR 自带一部分 consumer 规则（native 绑定等），它引用的 Play Services
+# 可选类在离线打包时并不存在，压掉这些告警即可。
 -dontwarn com.google.mlkit.**
 -dontwarn com.google.android.gms.**
+
+# 组件注册必须显式 keep：ML Kit 用 Firebase Components 的反射发现机制，从 Manifest
+# 元数据里的「类名字符串」实例化 ComponentRegistrar（见
+# com.google.firebase.components.ComponentDiscovery.instantiate(String)），再通过
+# getComponents() 注册真正的实现类。R8 看不到这条字符串引用，会把这些类当成无用代码：
+#   - 注册实现的 Scanner 类被整个删掉（zzg/zzh/zzl…），
+#   - Registrar 的无参构造被裁掉，
+# 结果是 MlKitContext.get(zzg.class) 返回 null，首次 BarcodeScanning.getClient() 就
+# 抛 NPE —— 现象就是「release 包一打开扫一扫就闪退」（debug 不混淆所以正常）。
+# 这里把注册相关类整包 keep，确保组件能被创建与注册。
+-keep class * implements com.google.firebase.components.ComponentRegistrar {
+    public <init>();
+}
+-keep class com.google.mlkit.** { *; }
+-keep class com.google.android.gms.internal.mlkit_vision_barcode.** { *; }
+-keep class com.google.android.gms.internal.mlkit_vision_barcode_bundled.** { *; }
+-keep class com.google.android.gms.internal.mlkit_vision_common.** { *; }
+-keep class com.google.android.gms.internal.mlkit_common.** { *; }
 
