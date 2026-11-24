@@ -57,7 +57,7 @@ import { certificateBase64Url, formatFingerprint } from './tls.js'
 export const DSH_VERSION = '0.2.2-rc.1'
 
 /** Gateway package version (kept in sync with package.json by hand). */
-export const GATEWAY_VERSION = '0.2.4'
+export const GATEWAY_VERSION = '0.3.0'
 
 /** `/v1` protocol version. */
 export const PROTOCOL_VERSION = 1
@@ -67,6 +67,15 @@ const APPROVAL_VALUES = new Set(['allowed-once', 'rejected', 'cancelled', 'unava
 
 /** Request body cap. */
 const BODY_LIMIT = 1_048_576
+
+/** /v1/pki/* 限流：每源 IP 每分钟请求数（契约 §5.1 的 429）。 */
+const PKI_RATE_PER_MINUTE_IP = 20
+
+/** /v1/pki/* 限流：全局每分钟请求数。 */
+const PKI_RATE_PER_MINUTE_GLOBAL = 60
+
+/** 公网 TLS 握手失败日志去重窗口（扫描器/无证书客户端不应刷屏）。 */
+const TLS_ERROR_LOG_INTERVAL_MS = 30_000
 
 /** Default page size for the messages route. */
 const DEFAULT_MESSAGE_LIMIT = 50
@@ -127,6 +136,8 @@ function isRecord(value) {
 const ROUTES = [
   ['GET', /^\/v1\/health$/, 'health'],
   ['POST', /^\/v1\/pair$/, 'pair'],
+  ['GET', /^\/v1\/pki\/ca$/, 'pkiCa'],
+  ['POST', /^\/v1\/pki\/enroll$/, 'pkiEnroll'],
   ['GET', /^\/v1\/workspaces$/, 'workspaces'],
   ['GET', /^\/v1\/sessions$/, 'sessionsList'],
   ['POST', /^\/v1\/sessions$/, 'sessionsCreate'],
@@ -707,12 +718,13 @@ export class ApiServer {
    * @param {import('./hub.js').EventHub} deps.hub
    * @param {import('./auth.js').AuthService} deps.auth
    * @param {{key:string,cert:string,fingerprint:string}|null} [deps.tls]
+   * @param {import('./mtls.js').ClientPki|null} [deps.pki] - client PKI for public-edge mTLS.
    * @param {string} [deps.dir]
    * @param {import('./translate.js').TranslationService} [deps.translate]
    * @param {import('./activity.js').ActivityTracker} [deps.activity]
    * @param {(req:any,socket:any,head:Buffer)=>void} [deps.onUpgrade]
    */
-  constructor({ ctx, config, logger, hub, auth, tls, dir, translate, activity, onUpgrade }) {
+  constructor({ ctx, config, logger, hub, auth, tls, pki, dir, translate, activity, onUpgrade }) {
     this.ctx = ctx ?? null
     this.config = config ?? {}
     this.logger = logger ?? {}
@@ -723,6 +735,8 @@ export class ApiServer {
     /** Background job tracker for the team activity panel (may be null in minimal test wiring). */
     this.activity = activity ?? null
     this.tls = tls ?? null
+    /** 公网边的客户端 PKI（mTLS）；创建失败时 index.js 传 null → 公网边不启动。 */
+    this.pki = pki ?? null
     this.dir = typeof dir === 'string' ? dir : ''
     this.onUpgrade = typeof onUpgrade === 'function' ? onUpgrade : null
 
@@ -759,6 +773,10 @@ export class ApiServer {
      * @type {string[]}
      */
     this.advertisedPublic = []
+    /** /v1/pki/* 领证限流状态（每源 IP + 全局滑动窗口）。 */
+    this.pkiRate = { byIp: new Map(), global: [] }
+    /** 公网 TLS 握手失败日志去重表（错误码 → 上次记录时间）。 */
+    this.tlsErrors = new Map()
   }
 
   /** Both listeners in `[lanServer, publicServer]` order (null when disabled). */
@@ -798,13 +816,14 @@ export class ApiServer {
 
     const httpsPort = Number(this.config.httpsPort) || 0
     if (httpsPort > 0) {
-      if (this.tls === null) {
-        this.logger.warn?.('HTTPS port configured but no TLS material is available; public listener disabled')
+      if (this.tls === null || this.pki === null) {
+        this.logger.warn?.('HTTPS port configured but the TLS material or client PKI is unavailable; public listener disabled')
       } else {
         const server = createHttpsServer(
-          { key: this.tls.key, cert: this.tls.cert },
+          { key: this.tls.key, cert: this.tls.cert, ...this.pki.tlsOptions() },
           (req, res) => this.#handle(req, res, { secure: true }),
         )
+        this.#attachRevocation(server)
         this.#attachUpgrade(server)
         const address = await this.#bind(server, httpsPort)
         this.publicServer = server
@@ -878,6 +897,8 @@ export class ApiServer {
         }
         this.upgradedSockets.add(socket)
         socket.on('close', () => this.upgradedSockets.delete(socket))
+        // WebSocket upgrade 与普通请求共用 guard：把 peer 证书挂在 req 上再分发。
+        req.clientCertificate = this.pki?.peerOf?.(req?.socket) ?? null
         this.onUpgrade(req, socket, head)
       } catch (error) {
         this.logger.warn?.(`upgrade dispatch failed: ${error?.message ?? error}`)
@@ -886,6 +907,40 @@ export class ApiServer {
         } catch {
           // ignore
         }
+      }
+    })
+  }
+
+  /**
+   * 公网边的“撤销即断开”与握手失败日志。
+   *
+   * 握手成功后立刻查内存撤销表：命中就 `socket.destroy()`，不给任何 HTTP 响应
+   * （契约 §9 的“连接级撤销”）。`tlsClientError` 只在 debug 记录，并按错误码
+   * 去重（30s 窗口），避免扫描器/无证书客户端把日志刷爆。
+   */
+  #attachRevocation(server) {
+    server.on('secureConnection', (socket) => {
+      try {
+        const peer = this.pki?.peerOf?.(socket)
+        if (peer === null || peer === undefined) return
+        if (!this.pki.isRevokedSerial(peer.serial)) return
+        this.logger.info?.('rejected revoked client certificate serial=' + peer.serial)
+        socket.destroy()
+      } catch (error) {
+        this.logger.debug?.('secureConnection check failed: ' + (error?.message ?? error))
+      }
+    })
+    server.on('tlsClientError', (error) => {
+      try {
+        const code = String(error?.code ?? error?.message ?? 'unknown')
+        const now = Date.now()
+        const last = this.tlsErrors.get(code) ?? 0
+        if (now - last < TLS_ERROR_LOG_INTERVAL_MS) return
+        if (this.tlsErrors.size > 32) this.tlsErrors.clear()
+        this.tlsErrors.set(code, now)
+        this.logger.debug?.('public TLS handshake rejected (' + code + ')')
+      } catch {
+        // 日志去重不能反向影响握手路径
       }
     })
   }
@@ -948,6 +1003,8 @@ export class ApiServer {
         localPort: req?.socket?.localPort,
         headers: req?.headers ?? {},
         path: pathname,
+        // 公网边：TLSSocket 的 peer 证书；LAN 边为 null。
+        clientCertificate: this.pki?.peerOf?.(req?.socket) ?? null,
       }) ?? { ok: false, status: 503, code: 'dsh_unavailable', message: 'gateway is not ready' }
       if (verdict.ok !== true) {
         this.#writeError(res, verdict.status ?? 403, verdict.code ?? 'forbidden_source', verdict.message)
@@ -1188,11 +1245,119 @@ export class ApiServer {
       public: this.publicPort > 0,
       uptimeMs: Date.now() - this.startedAt,
       ports: { lan: this.lanPort, public: this.publicPort },
+      // 老 APK 忽略未知字段；新 APK 用它判断公网边是否强制双向证书。
+      mtls: {
+        required: this.publicPort > 0,
+        caFingerprint: this.pki?.caFingerprint?.() ?? '',
+      },
     }
     if (typeof config.publicUrl === 'string' && config.publicUrl !== '') {
       body.publicUrl = normalizeOrigin(config.publicUrl)
     }
     writeJson(res, 200, body)
+  }
+
+  // ---------------------------------------------------------- /v1/pki routes
+
+  /** PKI 未就绪时统一 503（契约 §5.1 的降级语义）。 */
+  #requirePki() {
+    if (this.pki === null || typeof this.pki?.caCertificate !== 'function') {
+      throw new HttpError(503, 'dsh_unavailable', 'the client certificate PKI is not available')
+    }
+    return this.pki
+  }
+
+  /**
+   * 领证只在 LAN 边可达：先判边（公网边一律 403，即使带 token，A4），
+   * 再由 guard 的 ClientCertificate 规则兜底。
+   */
+  #assertLanEdge(verdict, req) {
+    const localPort = Number(req?.socket?.localPort)
+    const onPublicPort = this.publicPort > 0 && localPort === this.publicPort
+    if (verdict?.kind === 'public' || onPublicPort) {
+      throw new HttpError(403, 'forbidden_source', 'client certificates are issued on the LAN port only')
+    }
+  }
+
+  /**
+   * GET /v1/pki/* 的内存限流：每源 IP 20 次/分钟、全局 60 次/分钟。
+   * 超出抛 429 rate_limited（契约 §5.1）。
+   */
+  #assertPkiRate(remoteAddress) {
+    const now = Date.now()
+    const windowMs = 60_000
+    const address = typeof remoteAddress === 'string' && remoteAddress !== '' ? remoteAddress : 'unknown'
+    const perIp = (this.pkiRate.byIp.get(address) ?? []).filter((stamp) => now - stamp < windowMs)
+    const global = this.pkiRate.global.filter((stamp) => now - stamp < windowMs)
+    if (perIp.length >= PKI_RATE_PER_MINUTE_IP || global.length >= PKI_RATE_PER_MINUTE_GLOBAL) {
+      this.pkiRate.byIp.set(address, perIp)
+      this.pkiRate.global = global
+      throw new HttpError(429, 'rate_limited', 'too many certificate requests; try again later')
+    }
+    perIp.push(now)
+    global.push(now)
+    this.pkiRate.byIp.set(address, perIp)
+    this.pkiRate.global = global
+    if (this.pkiRate.byIp.size > 256) {
+      for (const [ip, stamps] of this.pkiRate.byIp) {
+        if (stamps.length === 0 || now - stamps[stamps.length - 1] >= windowMs) this.pkiRate.byIp.delete(ip)
+      }
+    }
+  }
+
+  /** GET /v1/pki/ca（仅 LAN 边）：下载 CA 证书与指纹。 */
+  hPkiCa({ res, req, verdict }) {
+    this.#assertLanEdge(verdict, req)
+    this.#assertPkiRate(req?.socket?.remoteAddress)
+    const pki = this.#requirePki()
+    const fingerprint = pki.caFingerprint()
+    writeJson(res, 200, {
+      ok: true,
+      ca: {
+        certificate: pki.caCertificate(),
+        fingerprint,
+        fingerprintPretty: formatFingerprint(fingerprint),
+      },
+    })
+  }
+
+  /** POST /v1/pki/enroll（仅 LAN 边）：CSR 领证。 */
+  async hPkiEnroll({ req, res, verdict }) {
+    this.#assertLanEdge(verdict, req)
+    this.#assertPkiRate(req?.socket?.remoteAddress)
+    const pki = this.#requirePki()
+    const body = await readJsonBody(req, BODY_LIMIT)
+    const issued = await pki.issueFromCsr({
+      csr: body.csr,
+      deviceId: body.deviceId,
+      deviceName: body.deviceName ?? body.name,
+    })
+    writeJson(res, 200, {
+      ok: true,
+      certificate: issued.certificate,
+      caCertificate: issued.caCertificate,
+      caFingerprint: issued.caFingerprint,
+      caFingerprintPretty: formatFingerprint(issued.caFingerprint),
+      serial: issued.serial,
+      notAfter: issued.notAfter,
+      deviceId: issued.deviceId,
+      name: issued.name,
+    })
+  }
+
+  // -------------------------------------------------------------- panel mTLS
+
+  /** 面板快照的 mTLS 摘要（契约 §5.2）。 */
+  #mtlsState() {
+    const fingerprint = this.pki?.caFingerprint?.() ?? ''
+    const certificates = this.pki?.list?.() ?? []
+    return {
+      enforced: this.publicPort > 0,
+      caFingerprint: fingerprint,
+      caFingerprintPretty: formatFingerprint(fingerprint),
+      certificateCount: certificates.length,
+      revokedCount: certificates.filter((entry) => entry?.revokedAt !== null && entry?.revokedAt !== undefined).length,
+    }
   }
 
   async hPair({ req, res }) {
@@ -1858,6 +2023,7 @@ export class ApiServer {
       config,
       publicUrls,
       lanUrls,
+      mtls: this.#mtlsState(),
       uptimeMs: Date.now() - this.startedAt,
       lastError: this.lastError,
     })
@@ -1909,9 +2075,69 @@ export class ApiServer {
     return view
   }
 
-  /** Revoke one paired device (panel only). */
+  /** Revoke one paired device (panel only); its client certificates follow. */
   panelRevokeDevice(deviceId) {
-    return this.auth?.revoke?.(deviceId) ?? false
+    const revoked = this.auth?.revoke?.(deviceId) ?? false
+    // auth.revoke 已经联动 pki.revokeByDevice；这里再兜一次，覆盖“只导出过证书、
+    // 没有设备令牌”的 deviceId（幂等，已撤销的不会重复计数）。
+    try {
+      this.pki?.revokeByDevice?.(deviceId)
+    } catch (error) {
+      this.logger.warn?.('client certificate revocation failed: ' + (error?.message ?? error))
+    }
+    return revoked
+  }
+
+  /** 面板：证书 CA + 列表（契约 §5.2 GET /certificates）。 */
+  async panelCertificates() {
+    const pki = this.#requirePki()
+    const fingerprint = pki.caFingerprint()
+    return {
+      ca: {
+        certificate: pki.caCertificate(),
+        fingerprint,
+        fingerprintPretty: formatFingerprint(fingerprint),
+      },
+      certificates: pki.list().map((entry) => ({
+        serial: entry.serial,
+        deviceId: entry.deviceId ?? null,
+        name: entry.name,
+        createdAt: entry.createdAt,
+        notAfter: entry.notAfter,
+        revokedAt: entry.revokedAt ?? null,
+        fingerprint: entry.fingerprint,
+        issuedVia: entry.issuedVia,
+      })),
+    }
+  }
+
+  /**
+   * 面板：生成一张可导出的客户端证书（契约 §5.2 POST /certificates）。
+   * 网关生成密钥对并立即持久化，p12 用用户密码保护（PBE 3DES）。
+   */
+  async panelIssueCertificate({ name, deviceId, password } = {}) {
+    const pki = this.#requirePki()
+    const issued = await pki.issueForExport({ name, deviceId, password })
+    return {
+      certificate: {
+        serial: issued.serial,
+        name: issued.name,
+        deviceId: issued.deviceId,
+        notAfter: issued.notAfter,
+        fingerprint: issued.fingerprint,
+      },
+      export: {
+        filename: 'dsh-gateway-client-' + issued.serial + '.p12',
+        mediaType: 'application/x-pkcs12',
+        dataBase64: Buffer.from(issued.p12).toString('base64'),
+        password: String(password),
+      },
+    }
+  }
+
+  /** 面板：按序列号撤销一张客户端证书（契约 §5.2 DELETE /certificates）。 */
+  panelRevokeCertificate(serial) {
+    return this.pki?.revoke?.(serial) ?? false
   }
 
   /**

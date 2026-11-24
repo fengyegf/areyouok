@@ -4,6 +4,7 @@ DeepSeek Harness（DSH）局域网/公网转发网关插件：把本机 DSH 的*
 
 - 设计文档：`docs/dsh-gateway-handoff.md`
 - 实现契约：`docs/dsh-gateway-impl-plan.md`
+- 公网 mTLS 契约：`docs/dsh-gateway-mtls.md`
 - 客户端：本仓库 `app/`（Kotlin + Compose，APK）
 
 ```
@@ -24,7 +25,7 @@ APK
 
 **默认配置下，同一局域网内任何设备都能完全控制本机 DSH，包括执行工具和读写文件。** 这是设计上的取舍（交接文档 D6）。请仅在可信网络中启用；需要更严格策略时把 `lanRequirePairing` 设为 `true`，或关闭 `httpPort`（设为 `0`）只保留公网 HTTPS 端口。
 
-公网端口（`httpsPort`）始终要求扫码获得的设备令牌；插件只转发白名单 API，不暴露设置/凭据/终端/插件/文件。
+公网端口（`httpsPort`）强制**双向证书认证（mTLS）**：设备必须持有本网关私有 CA 签发的客户端证书才能完成 TLS 握手，握手后仍要扫码获得的设备令牌；插件只转发白名单 API，不暴露设置/凭据/终端/插件/文件。详见[公网 mTLS](#公网-mtls双向证书)。
 
 ## 安装
 
@@ -87,6 +88,7 @@ pnpm install
 | `host` | `0.0.0.0` | 监听地址 |
 | `mdns` | true | 广播 `_dshgw._tcp` |
 | `lanRequirePairing` | false | 局域网是否也要求设备令牌 |
+| `clientCertDays` | 3650 | 签发的客户端证书有效期（天），1..3650 |
 | `publicUrl` | 空 | 手动指定公网基址（默认自动枚举全局 IPv6；代理 TUN / 保留段的虚拟地址不会被广播） |
 | `qrEmbedCertificate` | false | 公网配对二维码是否内嵌整张证书（默认只带 SHA-256 指纹，码更疏、更好扫） |
 | `maxDevices` | 4 | 同时在线设备上限 |
@@ -111,6 +113,8 @@ pnpm install
 ```
 GET  /v1/health                         免认证（仅私网/回环）
 POST /v1/pair                           扫码配对换设备令牌
+GET  /v1/pki/ca                         下载客户端 CA 证书与指纹（仅局域网边）
+POST /v1/pki/enroll                     CSR 换客户端证书（仅局域网边；公网 403 forbidden_source）
 GET  /v1/workspaces                     项目列表
 GET  /v1/sessions?workspaceId=          会话列表（默认过滤 subagent；?includeSubagents=1 看全部）
 POST /v1/sessions                       新建会话
@@ -136,8 +140,8 @@ WS   /v1/stream                         长连接（hello/sub/ack/ping）
 
 鉴权：
 
-- `7788`：回环全放行；私网放行（`lanRequirePairing=true` 时需 `Authorization: Bearer <deviceToken>`）；公网来源 403。
-- `7789`：任何来源都需要设备令牌；HTTPS 自签证书。
+- `7788`：回环全放行；私网放行（`lanRequirePairing=true` 时需 `Authorization: Bearer <deviceToken>`）；公网来源 403。客户端证书只在局域网边领取。
+- `7789`：**强制客户端证书（mTLS）**，且仍需设备令牌；HTTPS 服务端自签证书照旧由 App 固定指纹。
 - **配置页二维码可在「局域网 HTTP / 公网 HTTPS」两个版本间切换**：
   - 局域网版 `dshgw://pair?url=http://<ip>:7788&…` 不带证书；APK 在同一网段时不会触碰 TLS，也不需要配对码（`lanRequirePairing=true` 时仍可在 LAN 上走 HTTP 配对换令牌）。
   - 公网版 `dshgw://pair?mode=pub&pub=https://…&fp=<sha256>&…` 把公网地址**和自签证书的 SHA-256 指纹**写进二维码；APK 扫码后直接在 App 内固定这张证书（`GatewayTls`/`GatewayPins` + 自定义 `TrustManager`/`HostnameVerifier`），**不需要把证书装进 Android 系统信任库**。默认**不再**内嵌 1.4 KB 的证书本体（`cert=`）：那会把二维码从 ~57 模块撑到 ~141 模块，面板里每模块只剩约 2px，手机相机解析不出来；需要整张证书时把 `qrEmbedCertificate` 设为 `true`。
@@ -253,9 +257,10 @@ curl -s -X POST http://127.0.0.1:7788/v1/translate -H "content-type: application
 - **运行状态**：DSH 连接、局域网 HTTP / 公网 HTTPS 端口、mDNS、已配对设备数、已运行时长
 - **扫码配对**：生成一次性 `dshgw://pair?…` 配对码，页内直接画出二维码；顶部可在**局域网 HTTP / 公网 HTTPS**两个版本间切换（公网版把自签证书的 SHA-256 指纹写进码里，App 扫码时直接固定这张证书），10 分钟有效
 - **已配对设备**：名称、设备 ID、最近来源、最近活跃、撤销
+- **客户端证书**：CA 指纹（可复制）、已签发证书列表（名称、序列号前 8 位、到期日、已撤销标记）、逐张撤销、导出 `.p12`
 - **开关**：`lanRequirePairing`、`mdns`（内存生效；`mdns` 需重启）
 
-四个分区在同一屏里从上到下排开，中间用一条分隔线断开，没有标签栏——内容本来就短，藏起来反而多一层要点的东西。
+这些分区在同一屏里从上到下排开，中间用一条分隔线断开，没有标签栏——内容本来就短，藏起来反而多一层要点的东西。其中「客户端证书」只在支持公网 mTLS 的网关上出现（老网关的 `panelState().mtls` 缺省，整个区块不渲染）。
 
 三种渲染面（同一个 `lib/client.js` 组件）：
 
@@ -269,7 +274,7 @@ curl -s -X POST http://127.0.0.1:7788/v1/translate -H "content-type: application
 
 | 文件 | 运行位置 | 作用 |
 |---|---|---|
-| `lib/client.js` | 浏览器（`dsh.client`，`settings.section` + `plugins.row.config` 槽） | 页面本身：状态卡片、二维码 SVG、设备表、开关；只用 `--dsw-alias-*` 主题令牌与 `ctx.locale` 文案 |
+| `lib/client.js` | 浏览器（`dsh.client`，`settings.section` + `plugins.row.config` 槽） | 页面本身：状态卡片、二维码 SVG、设备表、客户端证书列表与 `.p12` 导出对话框、开关；只用 `--dsw-alias-*` 主题令牌与 `ctx.locale` 文案 |
 | `lib/panel-routes.js` | Host（`ctx.webServer.register`） | 页面调用的 JSON 接口，挂在宿主服务器上，复用宿主的浏览器登录与 Host/Origin 栅栏 |
 | `lib/panel.js` | Host | 纯数据：地址枚举、`dshgw://` 深链、二维码矩阵、状态快照 |
 
@@ -280,10 +285,130 @@ GET    /plugins/dsh-gateway/state           面板快照
 GET    /plugins/dsh-gateway/pairing?mode=   当前配对码（无则 null；mode 选 lan/public 视图）
 POST   /plugins/dsh-gateway/pairing         生成新配对码（body `{mode}`）
 DELETE /plugins/dsh-gateway/devices?deviceId=  撤销设备
+GET    /plugins/dsh-gateway/certificates        CA 指纹 + 已签发客户端证书
+POST   /plugins/dsh-gateway/certificates        导出客户端证书 .p12（body {name?,deviceId?,password}）
+DELETE /plugins/dsh-gateway/certificates?serial=  撤销一张客户端证书
 PATCH  /plugins/dsh-gateway/config          切换 lanRequirePairing / mdns
 ```
 
 这些路由挂在**宿主的** webServer 上（而不是网关自己的 7788/7789），因此从 Web UI 的同源页面就能直接调用，且默认继承宿主的浏览器会话校验；`connection.requestRejection` 缺失时回退到回环 Host + 同源 Origin 自检，栅栏抛错一律按拒绝处理（fail-closed）。
+
+## 公网 mTLS（双向证书）
+
+公网端口（`httpsPort`）**没有开关**：只要它开着，就必须双向证书认证。局域网端口（`httpPort`）仍是无条件信任域，也仍然是唯一的领证入口。
+
+### 为什么
+
+- 公网地址可能被扫描到。没有客户端证书的设备连 TLS 握手都完不成，收不到任何 HTTP 状态码（`ERR_SSL_*` / Android 的 `SSLHandshakeException: certificate required`），攻击面从「猜 Bearer 令牌」缩到「先拿到一张证书」。
+- 每台设备一张证书，可以按设备撤销、按需重发，不必换网关密钥。
+- 服务端证书与 APK 的 `GatewayPins` 固定逻辑完全不变：防中间人靠指纹固定，防未授权设备靠客户端证书。
+- 局域网保持「无条件信任域」的既有取舍：同一局域网内可以自动领证，但公网仍然要求证书 + Bearer 令牌双保险。
+
+### 架构与数据文件
+
+每个插件实例（每个 `dataDir`）生成并持久化一套私有 CA，重启后指纹与已签发证书不变。数据都在 `<dataDir>/mtls/`：
+
+| 文件 | 权限 | 内容 |
+|---|---|---|
+| `ca-key.pem` | 0600 | CA 私钥（PKCS#8 PEM） |
+| `ca-cert.pem` | 0644 | CA 证书（自签，`basicConstraints CA:TRUE`） |
+| `clients.json` | 0600 | 注册表：已签发证书 + 撤销表（原子写；坏文件备份后重建，绝不阻止网关启动） |
+| `keys/<serial>.key.pem` | 0600 | 面板导出证书时保存的私钥，用于重复导出；CSR 领证路径不保存私钥 |
+
+- CA：`CN=DSH Gateway CA <数据目录短标识>`，有效期 10 年。
+- 客户端证书：`CN=<deviceId 或导出名>`，`extKeyUsage=clientAuth`，有效期 `clientCertDays`（默认 3650 天）。
+- 公网边用 `requestCert + rejectUnauthorized`：非本 CA 签发、无证书的握手直接失败；握手成功后再查撤销表，命中则立刻断开，不给任何 HTTP 响应。
+- 面板里的「客户端 CA 指纹」（`caFingerprintPretty`）就是 `GET /v1/pki/ca` 返回的同一个值，可用于核对设备导入的是不是本网关。
+
+### 在面板导出 `.p12`
+
+给一台**没有在局域网里出现过的设备**（或老 APK）用：
+
+1. 设置 → **DSH 网关** → **客户端证书**，确认顶部 CA 指纹与本机一致。
+2. 点「导出证书文件（.p12）」。
+3. 填设备名（可空，会写进证书 CN）和证书密码（6~64 位，输两遍）。
+4. 点「导出」，浏览器会下载 `dsh-gateway-client-<serial>.p12`。
+5. 证书列表会立刻多出一行（序列号前 8 位、到期日）。
+6. 把 `.p12` 和密码**分开**传给手机。
+
+导出格式是密码保护的 PKCS#12（PBE 3DES），JDK / Android 的 `KeyStore("PKCS12")` 可直接打开。密码只用于这个文件；网关侧保留一份私钥副本（0600），所以同一张证书可以反复导出，忘记密码时重新导出即可。
+
+### APK 导入
+
+1. 手机设置 → **DSH 网关** → **客户端证书** → 「从文件导入」。
+2. 选 `.p12`，输入导出时的密码。
+3. 导入成功后即可连接公网地址；公网仍需要该设备自己的 Bearer 令牌（扫码配对或局域网配对获得）。
+4. 导入失败会给出中文原因（密码错误 / 文件损坏 / 证书已过期）。
+
+### 局域网自动领证（存量设备迁移）
+
+升级前已经配对的设备只有 token，没有证书。**不需要重新配对**：
+
+1. 升级并**完全重启 DSH**（插件随进程加载）。公网端口此时已强制 mTLS，老手机会连不上公网——这是预期。
+2. 手机回到同一局域网，按平时的局域网二维码连接一次。
+3. APK 发现本机没有该网关 CA 签发的证书，自动生成密钥对 + CSR，`POST /v1/pki/enroll` 领证并持久化。
+4. 之后公网连接恢复，token 与配对关系都没变。
+
+注意：
+
+- 领证只在局域网边可用；公网边对 `/v1/pki/*` 一律 `403 forbidden_source`（即使带着有效令牌）。
+- `lanRequirePairing=true` 时，领证同样要求 Bearer 令牌，否则任何局域网设备都能借证书绕过配对开关。
+- 老 APK（不支持 mTLS）不会自动领证：要么升级 App，要么用上面的 `.p12` 导入方案。
+
+### 撤销与续期
+
+- **撤销单张证书**：面板「客户端证书」列表里点「撤销」。立即生效：该设备下一次公网握手会被断开，其它设备不受影响。
+- **撤销设备**：「已配对设备」里撤销设备时，该 deviceId 名下的客户端证书会一起进撤销表。
+- **续期 / 换机**：再导出（或让手机在局域网重新领证）一张新证书，然后撤销旧的。旧证书到期后握手失败，App 会提示「客户端证书已失效或被撤销，请重新领证」。
+- **换 CA**：停掉网关，删除 `<dataDir>/mtls/` 后重启 —— 会生成新 CA，所有旧证书立刻作废，所有设备都要重新领证/导入。只在怀疑 CA 私钥泄露时这么做。
+
+### 老 APK 的行为
+
+- 公网连接在 TLS 握手阶段失败，拿不到 HTTP 状态码；App 侧通常显示握手失败或「证书指纹不匹配」类错误（实际原因是服务端在要求客户端证书）。
+- `/v1/health` 新增了 `mtls: {required, caFingerprint}` 字段，老客户端会忽略未知字段，不影响解析。
+- 公网 `/v1/pair` 仍然免 token，但**必须先完成客户端证书握手**；因此远程全新设备只有两条路：「导入 `.p12` → 公网配对」或「局域网配对 → 自动领证」。
+
+### 接口
+
+局域网边（仅私网来源）：
+
+```jsonc
+// GET /v1/pki/ca
+{ "ok": true, "ca": { "certificate": "-----BEGIN CERTIFICATE-----…", "fingerprint": "<sha256 hex>", "fingerprintPretty": "AA:BB:…" } }
+
+// POST /v1/pki/enroll  body: {csr, deviceId?, deviceName?}
+{ "ok": true, "certificate": "<leaf PEM>", "caCertificate": "<CA PEM>", "caFingerprint": "…",
+  "caFingerprintPretty": "…", "serial": "1A2B3C", "notAfter": 2044764400000, "deviceId": "…", "name": "…" }
+```
+
+公网边对这两条一律返回 `403 forbidden_source`；PKI 未就绪（例如 CA 文件损坏且重建失败）时返回 `503 dsh_unavailable`。
+
+面板边（宿主 Web 服务器，浏览器登录保护下）：
+
+```jsonc
+// GET /plugins/dsh-gateway/certificates
+{ "ok": true, "ca": { "certificate": "…", "fingerprint": "…", "fingerprintPretty": "…" },
+  "certificates": [ { "serial": "1A2B3C", "deviceId": null, "name": "Pixel 8", "createdAt": 1732450000000,
+                      "notAfter": 2044764400000, "revokedAt": null, "fingerprint": "…", "issuedVia": "lan-enroll" } ] }
+
+// POST /plugins/dsh-gateway/certificates  body: {name?, deviceId?, password}
+{ "ok": true,
+  "certificate": { "serial": "1A2B3C", "name": "…", "deviceId": "…", "notAfter": 2044764400000, "fingerprint": "…" },
+  "export": { "filename": "dsh-gateway-client-1A2B3C.p12", "mediaType": "application/x-pkcs12",
+              "dataBase64": "…", "password": "用户输入" } }
+
+// DELETE /plugins/dsh-gateway/certificates?serial=1A2B3C
+{ "ok": true, "revoked": true, "serial": "1A2B3C" }
+```
+
+`password` 缺失、短于 6 位或超过 64 位时，面板路由直接返回 `400 invalid_request`（不进入签发）。
+
+### 安全说明
+
+- **局域网 = 无条件信任域**：这是既有取舍（交接文档 D6），LAN 上任何设备都能领证；但公网仍需证书 + 令牌，所以领证本身不扩大公网越权面。需要更严时把 `lanRequirePairing` 设为 `true`。
+- **私钥保护**：导出的 `.p12` 由用户密码加密；网关侧保留导出路径的私钥（0600）以便重复导出，面板本身已有宿主登录保护。CSR 领证路径只在手机上持有私钥，网关不保存。
+- **撤销是连接级的**：没有 CRL/OCSP，握手成功后立即断开；已建立的连接在断开后重连会被拒。
+- 传输始终是 TLS 1.2+；客户端证书固定 RSA-2048 + SHA-256。
 
 ## 开发
 
@@ -332,12 +457,14 @@ node tools/install-gateway.mjs --remove --apply  # 卸载
 | 插件页一直「正在读取…」 | 宿主 `webServer` 未注册到 `/plugins/dsh-gateway/*`：看日志有无 `in-app plugin panel did not mount`；旧版 DSH 缺少 `ctx.webServer.register` 时配置页无后端 |
 | 设置面板里没有「DSH 网关」 | 宿主未声明 `settings.section` 槽（旧版 DSH）；插件仍可从「插件 → 已安装插件」的行配置页进入 |
 | 插件页 403 | 宿主 `connection.requestRejection` 拒绝了请求（Host/Origin 不被信任，或浏览器会话未登录）；同源打开 Web UI 再试 |
+| 公网连不上，App 报 `SSLHandshakeException: certificate required`（或 alert 116） | 该设备没有客户端证书：回到局域网联网自动领证，或在面板导出 `.p12` 后导入 |
+| 面板里没有「客户端证书」区块 | 网关版本不含 mTLS 半（`panelState().mtls` 缺省），或 PKI 初始化失败（看日志 `mtls`），此时相关路由返回 `503 dsh_unavailable` |
 
 ## 兼容性
 
 - DSH `0.2.2-rc.1`（已针对该版本源码核实回环协议与配置页槽位）。
 - Node.js `>= 20`（DSH 桌面运行时自带）。
-- 运行时依赖：`ws`、`bonjour-service`、`selfsigned`、`ipaddr.js`、`qrcode`、`@deepseek-ai/schemastery`。
+- 运行时依赖：`ws`、`bonjour-service`、`selfsigned`、`ipaddr.js`、`qrcode`、`@deepseek-ai/schemastery`，以及公网 mTLS 用的 `node-forge`（CA/证书/PKCS#12）。
 - 浏览器半不引入任何 `@deepseek-ai/dsh-client-*` 模块，只依赖 `slots` / `locale` 两个公开客户端服务与 `fetch`。
 
 ## 许可

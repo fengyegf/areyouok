@@ -17,6 +17,7 @@
  * @module dsh-gateway/test/helper
  */
 
+import { generateKeyPairSync } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
@@ -33,7 +34,7 @@ export const TEST_DIR = fileURLToPath(new URL('.', import.meta.url))
 export const DEFAULT_TIMEOUT_MS = 8_000
 
 /** Module loaders that may be missing while plugin-core / plugin-edge work. */
-const LIB_MODULES = ['index.js', 'util.js', 'config.js', 'hub.js', 'normalize.js', 'dsh.js', 'http.js', 'ws.js', 'auth.js', 'tls.js', 'mdns.js', 'panel.js', 'panel-routes.js']
+const LIB_MODULES = ['index.js', 'util.js', 'config.js', 'hub.js', 'normalize.js', 'dsh.js', 'http.js', 'ws.js', 'auth.js', 'tls.js', 'mtls.js', 'mdns.js', 'panel.js', 'panel-routes.js']
 
 /**
  * Wait for one condition, polling on a short interval.
@@ -413,8 +414,25 @@ export async function requestBinary(base, path, options = {}) {
  * @param {string} [options.method]
  * @param {Record<string,string>} [options.headers]
  * @param {unknown} [options.body]
+ * mTLS（公网边强制双向证书）时额外传以下任一组：
+ *   - `clientCert`：`{certificate, key, ca}`（`enrollClient()` 的返回值），
+ *   - `cert` / `key` / `ca`：直接给 PEM，
+ *   - `pfx` / `passphrase`：面板导出的 PKCS#12。
+ * @param {object} options
+ * @param {number} options.port
+ * @param {string} [options.host]
+ * @param {string} [options.path]
+ * @param {string} [options.method]
+ * @param {Record<string,string>} [options.headers]
+ * @param {unknown} [options.body]
  * @param {string} [options.token]
  * @param {number} [options.timeoutMs]
+ * @param {{certificate:string,key:string,ca?:string}} [options.clientCert]
+ * @param {string|Buffer} [options.cert]
+ * @param {string|Buffer} [options.key]
+ * @param {string|string[]} [options.ca]
+ * @param {Buffer|string} [options.pfx]
+ * @param {string} [options.passphrase]
  * @returns {Promise<{status:number, headers:object, text:string, json:any}>}
  */
 export function secureRequest(options) {
@@ -428,6 +446,16 @@ export function secureRequest(options) {
   }
   if (options.token !== undefined) headers.authorization = `Bearer ${options.token}`
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const tlsOptions = {}
+  const clientCertificate = options.clientCertificate ?? options.clientCert ?? null
+  const cert = options.cert ?? clientCertificate?.certificate
+  const key = options.key ?? clientCertificate?.key
+  const ca = options.ca ?? clientCertificate?.ca
+  if (cert !== undefined) tlsOptions.cert = cert
+  if (key !== undefined) tlsOptions.key = key
+  if (ca !== undefined) tlsOptions.ca = ca
+  if (options.pfx !== undefined) tlsOptions.pfx = options.pfx
+  if (options.passphrase !== undefined) tlsOptions.passphrase = options.passphrase
   return new Promise((resolve, reject) => {
     const req = httpsRequest(
       {
@@ -438,6 +466,9 @@ export function secureRequest(options) {
         headers,
         rejectUnauthorized: false,
         timeout: timeoutMs,
+        // 每个请求一条新连接：mTLS 撤销/换证书的用例不能被连接池复用掩盖。
+        agent: options.agent === undefined ? false : options.agent,
+        ...tlsOptions,
       },
       (res) => {
         const chunks = []
@@ -459,6 +490,75 @@ export function secureRequest(options) {
     if (payload !== undefined) req.write(payload)
     req.end()
   })
+}
+
+/**
+ * 生成一对 RSA-2048 客户端密钥（PEM）。
+ */
+export function makeClientKeyPair() {
+  const pair = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'pkcs1', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  })
+  return { publicKey: pair.publicKey, privateKey: pair.privateKey }
+}
+
+/**
+ * 生成一张 PKCS#10 CSR（node-forge 按需加载，避免拖慢不关心 mTLS 的测试）。
+ * @param {{commonName?:string, keys?:{publicKey:string,privateKey:string}}} [options]
+ * @returns {Promise<{csr:string, keys:{publicKey:string,privateKey:string}}>}
+ */
+export async function makeClientCsr(options = {}) {
+  const keys = options.keys ?? makeClientKeyPair()
+  const commonName = typeof options.commonName === 'string' && options.commonName !== ''
+    ? options.commonName
+    : 'test-client'
+  const forge = (await import('node-forge')).default
+  const request = forge.pki.createCertificationRequest()
+  request.publicKey = forge.pki.publicKeyFromPem(keys.publicKey)
+  request.setSubject([{ name: 'commonName', value: commonName }])
+  request.sign(forge.pki.privateKeyFromPem(keys.privateKey), forge.md.sha256.create())
+  return { csr: forge.pki.certificationRequestToPem(request), keys }
+}
+
+/**
+ * 在 LAN 边领一张客户端证书（对应 APK 的自动领证，契约 §5.1）。
+ *
+ * @param {string} base - LAN 基址（http://127.0.0.1:<lanPort>）。
+ * @param {{deviceId?:string, deviceName?:string, token?:string, keys?:object, csr?:string,
+ *   timeoutMs?:number}} [options]
+ * @returns {Promise<{certificate:string, ca:string, key:string, serial:string,
+ *   deviceId:string|null, name:string, notAfter:number, json:any}>}
+ */
+export async function enrollClient(base, options = {}) {
+  const keys = options.keys ?? makeClientKeyPair()
+  const csr = options.csr ?? (await makeClientCsr({
+    commonName: options.deviceName ?? options.deviceId ?? 'test-client',
+    keys,
+  })).csr
+  const body = { csr }
+  if (options.deviceId !== undefined) body.deviceId = options.deviceId
+  if (options.deviceName !== undefined) body.deviceName = options.deviceName
+  const response = await request(base, '/v1/pki/enroll', {
+    method: 'POST',
+    body,
+    token: options.token,
+    timeoutMs: options.timeoutMs,
+  })
+  if (response.status !== 200 || response.json?.ok !== true) {
+    throw new Error('client enrollment failed: HTTP ' + response.status + ' ' + response.text)
+  }
+  return {
+    certificate: response.json.certificate,
+    ca: response.json.caCertificate,
+    key: keys.privateKey,
+    serial: response.json.serial,
+    deviceId: response.json.deviceId ?? null,
+    name: response.json.name ?? '',
+    notAfter: response.json.notAfter ?? 0,
+    json: response.json,
+  }
 }
 
 /**
@@ -509,9 +609,18 @@ export class StreamClient {
    */
   static async connect(url, options = {}) {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    const clientCertificate = options.clientCertificate ?? options.clientCert ?? null
+    const cert = options.cert ?? clientCertificate?.certificate
+    const key = options.key ?? clientCertificate?.key
+    const ca = options.ca ?? clientCertificate?.ca
     const socket = new WebSocket(url, {
       headers: options.headers ?? {},
       ...(options.insecure === true ? { rejectUnauthorized: false } : {}),
+      ...(cert === undefined ? {} : { cert }),
+      ...(key === undefined ? {} : { key }),
+      ...(ca === undefined ? {} : { ca }),
+      ...(options.pfx === undefined ? {} : { pfx: options.pfx }),
+      ...(options.passphrase === undefined ? {} : { passphrase: options.passphrase }),
     })
     // Attach the frame listener *before* awaiting `open`: the gateway sends
     // `ready` immediately after the handshake, so a listener installed later
@@ -664,7 +773,8 @@ export class StreamClient {
  * Connect one `/v1/stream` client and register its teardown.
  * @param {{add:Function}} resources
  * @param {string} base - HTTP base URL of the gateway.
- * @param {{token?:string, timeoutMs?:number, path?:string}} [options]
+ * @param {{token?:string, timeoutMs?:number, path?:string, insecure?:boolean,
+ *   clientCert?:{certificate:string,key:string,ca?:string}}} [options]
  * @returns {Promise<StreamClient>}
  */
 export async function connectStream(resources, base, options = {}) {
@@ -674,6 +784,7 @@ export async function connectStream(resources, base, options = {}) {
     headers,
     timeoutMs: options.timeoutMs,
     insecure: options.insecure === true,
+    clientCert: options.clientCert,
   })
   resources.add(() => client.close())
   return client
@@ -741,9 +852,12 @@ export default {
   StreamClient,
   connectStream,
   createResources,
+  enrollClient,
   freePort,
   libStatus,
   loadLib,
+  makeClientCsr,
+  makeClientKeyPair,
   makeCtx,
   makeLogger,
   makeTempDir,

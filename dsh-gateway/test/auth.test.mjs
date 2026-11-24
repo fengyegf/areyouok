@@ -16,7 +16,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { createResources, freePort, libStatus, secureRequest, startGateway, waitForHealth } from './helper.mjs'
+import { createResources, enrollClient, freePort, libStatus, secureRequest, startGateway, waitForHealth } from './helper.mjs'
 import { StreamClient } from './helper.mjs'
 import { MockDsh } from './mock-dsh.mjs'
 
@@ -181,9 +181,22 @@ describe('AuthService.guard', () => {
     assert.equal(denied.status, 401)
   })
 
-  it('always requires a token on the public HTTPS port, even from loopback', async () => {
+  it('always requires a client certificate and a token on the public HTTPS port', async () => {
     const { auth } = await makeAuth({ httpsPort: HTTPS_PORT })
-    const denied = auth.guard({ remoteAddress: '127.0.0.1', localPort: HTTPS_PORT, headers: {} })
+    const clientCertificate = { serial: 'A1B2C3', deviceId: null, name: 'test', fingerprint: '', notAfter: 0 }
+
+    // TLS 层已经拦下无证书客户端，guard 再兜一层（纵深防御，契约 §4.3）。
+    const withoutCertificate = auth.guard({ remoteAddress: '127.0.0.1', localPort: HTTPS_PORT, headers: {} })
+    assert.equal(withoutCertificate.ok, false)
+    assert.equal(withoutCertificate.status, 403)
+    assert.equal(withoutCertificate.code, 'client_certificate_required')
+
+    const denied = auth.guard({
+      remoteAddress: '127.0.0.1',
+      localPort: HTTPS_PORT,
+      headers: {},
+      clientCertificate,
+    })
     assert.equal(denied.ok, false)
     assert.equal(denied.status, 401)
     assert.equal(denied.code, 'unauthenticated')
@@ -194,16 +207,73 @@ describe('AuthService.guard', () => {
       remoteAddress: '2408::1',
       localPort: HTTPS_PORT,
       headers: { authorization: `Bearer ${paired.deviceToken}` },
+      clientCertificate,
     })
     assert.equal(allowed.ok, true)
     assert.equal(allowed.device?.deviceId, 'dev-pub')
   })
 
-  it('lets /v1/pair through on the public port before authentication', async () => {
+  it('lets /v1/pair through on the public port with a client certificate only', async () => {
     const { auth } = await makeAuth({ httpsPort: HTTPS_PORT })
-    const verdict = auth.guard({ remoteAddress: '2408::77', localPort: HTTPS_PORT, headers: {}, path: '/v1/pair' })
+    const clientCertificate = { serial: 'A1B2C3', deviceId: null, name: 'test', fingerprint: '', notAfter: 0 }
+
+    const withoutCertificate = auth.guard({ remoteAddress: '2408::77', localPort: HTTPS_PORT, headers: {}, path: '/v1/pair' })
+    assert.equal(withoutCertificate.ok, false)
+    assert.equal(withoutCertificate.code, 'client_certificate_required')
+
+    const verdict = auth.guard({
+      remoteAddress: '2408::77',
+      localPort: HTTPS_PORT,
+      headers: {},
+      path: '/v1/pair',
+      clientCertificate,
+    })
     assert.equal(verdict.ok, true)
     assert.equal(verdict.device, null)
+  })
+
+  it('never issues certificates on the public edge, even with a token', async () => {
+    const { auth } = await makeAuth({ httpsPort: HTTPS_PORT })
+    const clientCertificate = { serial: 'A1B2C3', deviceId: null, name: 'test', fingerprint: '', notAfter: 0 }
+    const pairing = auth.createPairingCode(['https://[2408::1]:7789'])
+    const paired = await auth.pair({ code: pairing.code, deviceName: 'Pixel', deviceId: 'dev-pub-pki', remoteAddress: '2408::1' })
+    for (const path of ['/v1/pki/ca', '/v1/pki/enroll']) {
+      const verdict = auth.guard({
+        remoteAddress: '2408::1',
+        localPort: HTTPS_PORT,
+        headers: { authorization: `Bearer ${paired.deviceToken}` },
+        path,
+        clientCertificate,
+      })
+      assert.equal(verdict.ok, false, path + ' must be refused on the public edge')
+      assert.equal(verdict.status, 403)
+      assert.equal(verdict.code, 'forbidden_source')
+    }
+  })
+
+  it('issues certificates on the LAN edge without a token unless lanRequirePairing is on', async () => {
+    const { auth } = await makeAuth()
+    const open = auth.guard({ remoteAddress: '192.168.1.30', localPort: LAN_PORT, headers: {}, path: '/v1/pki/enroll' })
+    assert.equal(open.ok, true)
+    const ca = auth.guard({ remoteAddress: '192.168.1.30', localPort: LAN_PORT, headers: {}, path: '/v1/pki/ca' })
+    assert.equal(ca.ok, true)
+
+    auth.setLanRequirePairing(true)
+    const strict = auth.guard({ remoteAddress: '192.168.1.30', localPort: LAN_PORT, headers: {}, path: '/v1/pki/enroll' })
+    assert.equal(strict.ok, false)
+    assert.equal(strict.status, 401)
+    assert.equal(strict.code, 'unauthenticated')
+
+    const pairing = auth.createPairingCode([])
+    const paired = await auth.pair({ code: pairing.code, deviceName: 'Pixel', deviceId: 'dev-lan-pki', remoteAddress: '192.168.1.30' })
+    const allowed = auth.guard({
+      remoteAddress: '192.168.1.30',
+      localPort: LAN_PORT,
+      headers: { authorization: `Bearer ${paired.deviceToken}` },
+      path: '/v1/pki/enroll',
+    })
+    assert.equal(allowed.ok, true)
+    assert.equal(allowed.device?.deviceId, 'dev-lan-pki')
   })
 })
 
@@ -349,12 +419,24 @@ describe('public HTTPS edge (full stack)', { skip: reason }, () => {
         assert.equal(health.status, 200)
         assert.equal(health.json.ok, true)
 
-        // Public HTTPS from loopback: 401 without a token.
-        const denied = await secureRequest({ port: httpsPort, path: '/v1/health' })
+        // 公网边强制双向证书：先在 LAN 边领一张客户端证书（A9 的老设备也能领）。
+        const client = await enrollClient(lanBase, { deviceId: 'device-https', deviceName: 'Pixel' })
+
+        // 无客户端证书 → TLS 握手失败，拿不到任何 HTTP 状态码（A1）。
+        await assert.rejects(
+          secureRequest({ port: httpsPort, path: '/v1/health' }),
+          (error) => {
+            assert.equal(error?.statusCode, undefined)
+            return true
+          },
+        )
+
+        // 有证书但无 Bearer 令牌 → 401（A2）。
+        const denied = await secureRequest({ port: httpsPort, path: '/v1/health', clientCert: client })
         assert.equal(denied.status, 401)
         assert.equal(denied.json?.error?.code, 'unauthenticated')
 
-        // Pair over the public port (pre-auth route) then use the token.
+        // Pair over the public port (pre-auth route, but the certificate is mandatory) then use the token.
         const pairing = gateway.auth.createPairingCode([`https://127.0.0.1:${httpsPort}`], {
           fingerprint: gateway.api?.tls?.fingerprint ?? undefined,
         })
@@ -362,22 +444,42 @@ describe('public HTTPS edge (full stack)', { skip: reason }, () => {
           port: httpsPort,
           path: '/v1/pair',
           method: 'POST',
+          clientCert: client,
           body: { code: pairing.code, deviceName: 'Pixel', deviceId: 'device-https' },
         })
         assert.equal(paired.status, 200, `pair failed: ${paired.text}`)
         assert.equal(paired.json.ok, true)
         assert.equal(typeof paired.json.deviceToken, 'string')
 
-        const authorized = await secureRequest({ port: httpsPort, path: '/v1/health', token: paired.json.deviceToken })
+        const authorized = await secureRequest({
+          port: httpsPort,
+          path: '/v1/health',
+          token: paired.json.deviceToken,
+          clientCert: client,
+        })
         assert.equal(authorized.status, 200)
         assert.equal(authorized.json.ok, true)
         assert.equal(authorized.json.paired, true)
+        assert.equal(authorized.json.mtls?.required, true)
+        assert.equal(authorized.json.mtls?.caFingerprint, gateway.pki.caFingerprint())
 
-        // Revoking invalidates the token immediately.
+        // Revoking the device also revokes its client certificate: the next
+        // connection dies right after the TLS handshake (A6), so the client
+        // sees a transport error instead of an HTTP 401.
         gateway.auth.revoke(paired.json.deviceId)
-        const revoked = await secureRequest({ port: httpsPort, path: '/v1/health', token: paired.json.deviceToken })
-        assert.equal(revoked.status, 401)
-        assert.equal(revoked.json?.error?.code, 'unauthenticated')
+        assert.equal(gateway.pki.isRevokedSerial(client.serial), true)
+        await assert.rejects(
+          secureRequest({
+            port: httpsPort,
+            path: '/v1/health',
+            token: paired.json.deviceToken,
+            clientCert: client,
+          }),
+          (error) => {
+            assert.equal(error?.statusCode, undefined)
+            return true
+          },
+        )
       } finally {
         await gateway.stop()
       }
@@ -401,10 +503,20 @@ describe('public HTTPS edge (full stack)', { skip: reason }, () => {
       try {
         await waitForHealth(lanBase)
         const wsUrl = `wss://127.0.0.1:${httpsPort}/v1/stream`
+        const clientCert = await enrollClient(lanBase, {
+          deviceId: 'device-https-ws',
+          deviceName: 'Pixel WS',
+        })
 
-        // No token: the upgrade is refused before the WebSocket handshake.
+        // No client certificate: the TLS handshake fails before any HTTP response.
         await assert.rejects(
           StreamClient.connect(wsUrl, { insecure: true, timeoutMs: 4_000 }),
+          /certificate|handshake|ECONNRESET|socket hang up|alert/i,
+        )
+
+        // Certificate but no token: the upgrade is refused before the WebSocket handshake.
+        await assert.rejects(
+          StreamClient.connect(wsUrl, { insecure: true, clientCert, timeoutMs: 4_000 }),
           /HTTP 401|socket hang up|ECONNRESET/i,
         )
 
@@ -418,6 +530,7 @@ describe('public HTTPS edge (full stack)', { skip: reason }, () => {
         })
         const client = await StreamClient.connect(wsUrl, {
           insecure: true,
+          clientCert,
           headers: { authorization: `Bearer ${paired.deviceToken}` },
           timeoutMs: 6_000,
         })

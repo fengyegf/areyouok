@@ -29,6 +29,7 @@ export const DEFAULTS = Object.freeze({
   name: '',
   logFile: '',
   deviceTokenTtlDays: 0,
+  clientCertDays: 3650,
   pairingCodeTtlMs: 600_000,
   translateEnabled: true,
   translateProvider: 'bing',
@@ -53,6 +54,8 @@ export const Config = z.object({
   ringSize: z.natural().default(DEFAULTS.ringSize).description('事件 ring 保留条数'),
   heartbeatMs: z.natural().default(DEFAULTS.heartbeatMs).description('WS 服务端心跳间隔'),
   idleTimeoutMs: z.natural().default(DEFAULTS.idleTimeoutMs).description('WS 空闲判死阈值'),
+  clientCertDays: z.natural().default(DEFAULTS.clientCertDays).min(1).max(3650)
+    .description('公网 mTLS 客户端证书有效期（天），范围 1..3650'),
   name: z.string().default(DEFAULTS.name).description('网关显示名（默认主机名）'),
   logFile: z.string().default(DEFAULTS.logFile).description('日志文件路径，空表示 <dataDir>/gateway.log'),
   translateEnabled: z.boolean().default(DEFAULTS.translateEnabled).description('是否启用思考链翻译（/v1/translate）'),
@@ -108,6 +111,7 @@ export function resolveConfig(raw) {
   config.translateMaxResponseBytes = intOf(input.translateMaxResponseBytes, DEFAULTS.translateMaxResponseBytes, 1024, 16_777_216)
   config.translateCacheMaxEntries = intOf(input.translateCacheMaxEntries, DEFAULTS.translateCacheMaxEntries, 0, 10_000)
   config.deviceTokenTtlDays = intOf(input.deviceTokenTtlDays, DEFAULTS.deviceTokenTtlDays, 0, 3650)
+  config.clientCertDays = intOf(input.clientCertDays, DEFAULTS.clientCertDays, 1, 3650)
   config.pairingCodeTtlMs = intOf(input.pairingCodeTtlMs, DEFAULTS.pairingCodeTtlMs, 30_000, 3_600_000)
   if (config.httpPort !== 0 && config.httpPort === config.httpsPort) config.httpsPort = 0
   return config

@@ -14,6 +14,13 @@
  *   - `POST   /plugins/dsh-gateway/pairing`          mint a pairing code
  *   - `DELETE /plugins/dsh-gateway/devices/{id}`     revoke one device
  *   - `PATCH  /plugins/dsh-gateway/config`           switch lanRequirePairing / mdns
+ *   - `GET    /plugins/dsh-gateway/certificates`     issued client certificates + CA
+ *   - `POST   /plugins/dsh-gateway/certificates`     issue one certificate for export (.p12)
+ *   - `DELETE /plugins/dsh-gateway/certificates?serial=`  revoke one client certificate
+ *
+ * The certificate routes are the panel half of the public-edge mTLS feature
+ * (docs/dsh-gateway-mtls.md §5.2): they call the ApiServer methods added by the
+ * mTLS module, and answer `503 dsh_unavailable` when this build has no PKI.
  *
  * Every route repeats the host's own trust gate (`connection.requestRejection`,
  * which combines the Host/Origin fence with the browser login) before touching
@@ -134,6 +141,26 @@ function failFrom(res, error) {
 }
 
 /**
+ * Resolve one optional ApiServer panel method.
+ *
+ * The certificate routes are the panel half of the public-edge mTLS feature,
+ * and that half may be absent: an older gateway build, or a gateway whose PKI
+ * failed to initialise and came up with only the LAN edge. Keeping the routes
+ * mounted in that case is deliberate — the page then gets a definite
+ * `503 dsh_unavailable` envelope instead of the Host's plain 404.
+ * @param {object} gateway - the started ApiServer.
+ * @param {string} name - method name from the contract (§5.2).
+ * @returns {Function} the method, bound to the gateway.
+ */
+function panelMethod(gateway, name) {
+  const method = gateway?.[name]
+  if (typeof method !== 'function') {
+    throw new HttpError(503, 'dsh_unavailable', 'client certificate management is unavailable')
+  }
+  return method.bind(gateway)
+}
+
+/**
  * Register the panel routes on the host web server.
  *
  * A host `webServer` route is keyed by (kind, path) and rejects a second
@@ -240,6 +267,39 @@ export function mountPanel({ ctx, api, logger }) {
       const deviceId = String(url.searchParams.get('deviceId') ?? '').trim()
       if (deviceId === '') throw new HttpError(400, 'invalid_request', 'deviceId is required')
       ok(res, { revoked: gateway.panelRevokeDevice(deviceId), deviceId })
+    },
+  })
+
+  route(`${PANEL_PREFIX}/certificates`, {
+    GET: async (gateway, req, res) => {
+      // The Host method owns the shape: `{ca, certificates}` per §5.2.
+      ok(res, await panelMethod(gateway, 'panelCertificates')())
+    },
+    POST: async (gateway, req, res) => {
+      // "Export a certificate file": the Host generates the key pair and the
+      // PKCS#12, this route only validates the one field a bad value would turn
+      // into a Gateway defect — the password that protects the exported key.
+      const body = await readJsonBody(req, PANEL_BODY_LIMIT)
+      const input = body !== null && typeof body === 'object' ? body : {}
+      const password = typeof input.password === 'string' ? input.password : ''
+      if (password.length < 6) throw new HttpError(400, 'invalid_request', 'password must be at least 6 characters')
+      if (password.length > 64) throw new HttpError(400, 'invalid_request', 'password must be at most 64 characters')
+      const name = typeof input.name === 'string' ? input.name.trim() : ''
+      const deviceId = typeof input.deviceId === 'string' ? input.deviceId.trim() : ''
+      ok(res, await panelMethod(gateway, 'panelIssueCertificate')({
+        password,
+        ...(name === '' ? {} : { name }),
+        ...(deviceId === '' ? {} : { deviceId }),
+      }))
+    },
+    DELETE: async (gateway, req, res) => {
+      // Like `devices`, the serial rides the query string: an exact route
+      // cannot hold a path parameter.
+      const url = new URL(String(req.url ?? '/'), 'http://localhost')
+      const serial = String(url.searchParams.get('serial') ?? '').trim()
+      if (serial === '') throw new HttpError(400, 'invalid_request', 'serial is required')
+      const revoked = await panelMethod(gateway, 'panelRevokeCertificate')(serial)
+      ok(res, { revoked: revoked === true, serial })
     },
   })
 

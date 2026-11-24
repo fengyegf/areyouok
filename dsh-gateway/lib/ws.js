@@ -222,6 +222,8 @@ export class StreamServer {
         localPort: req?.socket?.localPort ?? socket?.localPort,
         headers: req?.headers ?? {},
         path: pathname,
+        // 公网边：http.js 的 #attachUpgrade 已把 peer 证书挂在 req 上。
+        clientCertificate: req?.clientCertificate ?? null,
       }) ?? { ok: false, status: 503, code: 'dsh_unavailable', message: 'gateway not ready' }
       if (verdict.ok !== true) {
         this.#rejectUpgrade(socket, verdict.status ?? 403, verdict.code ?? 'forbidden_source', verdict.message)

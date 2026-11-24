@@ -10,6 +10,9 @@
  *   - status: DSH link, LAN/public ports, mDNS, paired-device count, uptime,
  *   - pairing: a one-shot `dshgw://pair?…` code drawn as an inline SVG QR,
  *   - devices: the paired table with a revoke action per row,
+ *   - certificates: the client PKI for the public edge — CA fingerprint,
+ *     issued certificates, per-certificate revoke, and the `.p12` export
+ *     dialog used to enroll a device by file instead of over the LAN,
  *   - switches: `lanRequirePairing` and `mdns`, applied in memory with an
  *     explicit "restart DSH" notice where the listener only re-reads them then.
  *
@@ -46,6 +49,7 @@ window.__ModuleLoader__.load({
       'section.pairing': '扫码配对',
       'section.devices': '已配对设备',
       'section.config': '开关',
+      'section.certificates': '客户端证书',
       'status.dsh': 'DSH 连接',
       'status.lan': '局域网 HTTP',
       'status.public': '公网 HTTPS',
@@ -86,6 +90,32 @@ window.__ModuleLoader__.load({
       'switches.lanRequirePairing': '局域网也要求配对令牌',
       'switches.mdns': '启用 mDNS 广播',
       'switches.restart': '该项需要重启 DSH 才会按新值生效。',
+      'certificates.ca': 'CA 指纹',
+      'certificates.copy': '复制',
+      'certificates.copied': '已复制 CA 指纹',
+      'certificates.copyFailed': '复制失败，请手动选中指纹文本复制',
+      'certificates.export': '导出证书文件（.p12）',
+      'certificates.empty': '还没有客户端证书。公网访问要求双向证书：手机在局域网内会自动领取，或在这里导出 .p12 后导入。',
+      'certificates.expires': '到期',
+      'certificates.revoked': '已撤销',
+      'certificates.revoke': '撤销',
+      'certificates.revokeConfirm': '撤销证书 {serial} 后该设备将无法再通过公网连接，确定继续？',
+      'certificates.unnamed': '未命名证书',
+      'certificates.dialogTitle': '导出客户端证书（.p12）',
+      'certificates.dialogNote': '文件里含客户端私钥，导入手机时需要输入这里的密码。请把文件和密码分开传递。',
+      'certificates.name': '设备名',
+      'certificates.namePlaceholder': '例如：备用手机',
+      'certificates.password': '证书密码',
+      'certificates.passwordConfirm': '确认密码',
+      'certificates.passwordHint': '6~64 位，导入手机时要用同一个密码',
+      'certificates.passwordShort': '证书密码至少 6 位',
+      'certificates.passwordLong': '证书密码不能超过 64 位',
+      'certificates.passwordMismatch': '两次输入的密码不一致',
+      'certificates.exporting': '正在导出…',
+      'certificates.submit': '导出',
+      'certificates.cancel': '取消',
+      'certificates.exported': '已导出 {filename}，拷贝到手机后导入即可',
+      'certificates.invalidExport': '网关返回的导出数据不完整',
       'footnote': '局域网默认免认证意味着同一局域网内任何人都能控制本机 DSH，请仅在可信网络使用。',
       'name': 'dsh-gateway',
       'loading': '正在读取…',
@@ -94,6 +124,10 @@ window.__ModuleLoader__.load({
       'error.pairing': '生成配对码失败：{message}',
       'error.revoke': '撤销失败：{message}',
       'error.config': '保存失败：{message}',
+      'error.certificates': '读取客户端证书失败：{message}',
+      'error.export': '导出证书失败：{message}',
+      'error.revokeCertificate': '撤销证书失败：{message}',
+      'toast.revokedCertificate': '已撤销证书 {serial}',
       'toast.revoked': '已撤销 {name}',
       'toast.paired': '配对码已生成',
       'toast.saved': '已更新',
@@ -112,6 +146,7 @@ window.__ModuleLoader__.load({
       'section.pairing': 'Pairing',
       'section.devices': 'Devices',
       'section.config': 'Switches',
+      'section.certificates': 'Client certificates',
       'status.dsh': 'DSH link',
       'status.lan': 'LAN HTTP',
       'status.public': 'Public HTTPS',
@@ -152,6 +187,32 @@ window.__ModuleLoader__.load({
       'switches.lanRequirePairing': 'Require a device token on the LAN too',
       'switches.mdns': 'Advertise over mDNS',
       'switches.restart': 'This switch only takes effect after DSH restarts.',
+      'certificates.ca': 'CA fingerprint',
+      'certificates.copy': 'Copy',
+      'certificates.copied': 'CA fingerprint copied',
+      'certificates.copyFailed': 'Could not copy; select the fingerprint text manually',
+      'certificates.export': 'Export certificate file (.p12)',
+      'certificates.empty': 'No client certificates yet. The public edge requires mutual TLS: a phone on the LAN enrolls automatically, or export a .p12 here and import it.',
+      'certificates.expires': 'Expires',
+      'certificates.revoked': 'Revoked',
+      'certificates.revoke': 'Revoke',
+      'certificates.revokeConfirm': 'Revoking {serial} disconnects that device from the public edge for good. Continue?',
+      'certificates.unnamed': 'Unnamed certificate',
+      'certificates.dialogTitle': 'Export a client certificate (.p12)',
+      'certificates.dialogNote': 'The file holds the client private key. The password you set here is required when importing it. Keep file and password apart.',
+      'certificates.name': 'Device name',
+      'certificates.namePlaceholder': 'e.g. spare phone',
+      'certificates.password': 'Certificate password',
+      'certificates.passwordConfirm': 'Confirm password',
+      'certificates.passwordHint': '6–64 characters; import needs the same password',
+      'certificates.passwordShort': 'The certificate password needs at least 6 characters',
+      'certificates.passwordLong': 'The certificate password may not exceed 64 characters',
+      'certificates.passwordMismatch': 'The two passwords do not match',
+      'certificates.exporting': 'Exporting…',
+      'certificates.submit': 'Export',
+      'certificates.cancel': 'Cancel',
+      'certificates.exported': 'Exported {filename}; copy it to the phone and import it',
+      'certificates.invalidExport': 'The gateway returned an incomplete export',
       'footnote': 'The LAN edge is unauthenticated by default: anyone on this network can drive this DSH. Use it on trusted networks only.',
       'name': 'dsh-gateway',
       'loading': 'Loading…',
@@ -160,6 +221,10 @@ window.__ModuleLoader__.load({
       'error.pairing': 'Could not create a pairing code: {message}',
       'error.revoke': 'Could not revoke: {message}',
       'error.config': 'Could not save: {message}',
+      'error.certificates': 'Could not read client certificates: {message}',
+      'error.export': 'Could not export the certificate: {message}',
+      'error.revokeCertificate': 'Could not revoke the certificate: {message}',
+      'toast.revokedCertificate': 'Revoked certificate {serial}',
       'toast.revoked': 'Revoked {name}',
       'toast.paired': 'Pairing code created',
       'toast.saved': 'Updated',
@@ -303,6 +368,27 @@ window.__ModuleLoader__.load({
       /* The nav glyph the shell renders through `settings.section.icon`. It is
        * an inline <svg>, so it inherits the nav row's currentColor for its
        * frame and only needs the size and radius the shell's other icons use. */
+      /* Client certificates: a fingerprint line with a copy action, one row
+       * per issued certificate, and the .p12 export dialog on top of the page.
+       * Same tokens and typography as the rest of the panel. */
+      '.' + CLS + '-certFingerprint{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0}',
+      '.' + CLS + '-certFingerprint .' + CLS + '-mono{overflow-wrap:anywhere;min-width:0}',
+      '.' + CLS + '-badge{font-size:11px;line-height:16px;padding:1px 6px;border-radius:999px;margin-left:6px;',
+      'border:0.5px solid var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary)}',
+      '.' + CLS + '-rowActions{display:flex;gap:8px;flex:none;align-items:center}',
+      '.' + CLS + '-modal{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;',
+      'background:rgba(0,0,0,.42);padding:24px;box-sizing:border-box}',
+      '.' + CLS + '-dialog{width:min(420px,100%);max-height:calc(100vh - 48px);overflow:auto;display:flex;',
+      'flex-direction:column;gap:12px;padding:16px;box-sizing:border-box;border-radius:var(--dsw-radius-lg,10px);',
+      'background:var(--dsw-alias-bg-layer-1);border:0.5px solid var(--dsw-alias-border-l2);',
+      'box-shadow:0 12px 40px rgba(0,0,0,.28)}',
+      '.' + CLS + '-dialogTitle{margin:0;font-size:14px;font-weight:600;line-height:22px}',
+      '.' + CLS + '-field{display:flex;flex-direction:column;gap:4px;min-width:0}',
+      '.' + CLS + '-label{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}',
+      '.' + CLS + '-input{font:inherit;font-size:13px;line-height:20px;padding:5px 8px;min-width:0;',
+      'border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md,8px);',
+      'background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}',
+      '.' + CLS + '-dialogActions{display:flex;justify-content:flex-end;gap:8px}',
       '.' + CLS + '-navIcon{display:block;border-radius:4px;flex:none}',
     ].join('');
 
@@ -531,6 +617,19 @@ window.__ModuleLoader__.load({
        * rewrites the same one-shot code instead of minting a new one. */
       const [pairMode, setPairMode] = React.useState('lan');
 
+      /* Client certificates for the public edge (mTLS). The snapshot carries
+       * only counts and the CA fingerprint; the list itself comes from
+       * `GET /certificates`, refetched beside every successful poll. `mtls`
+       * being absent keeps the whole block hidden, so an older gateway (one
+       * without the mTLS half) renders exactly as before. */
+      const [certificates, setCertificates] = React.useState(null);
+      const [certError, setCertError] = React.useState('');
+      const [certDialog, setCertDialog] = React.useState(false);
+      const [certName, setCertName] = React.useState('');
+      const [certPassword, setCertPassword] = React.useState('');
+      const [certPasswordAgain, setCertPasswordAgain] = React.useState('');
+      const [certBusy, setCertBusy] = React.useState(false);
+
       /* The snapshot also lives in a ref: `refresh` must keep one identity for
        * the polling effect, so it cannot close over `state`, and it still has
        * to know whether a snapshot is already on screen when a poll fails. */
@@ -548,16 +647,38 @@ window.__ModuleLoader__.load({
         setError('');
       }, []);
 
+      /** Read the issued-certificate list (panel API, docs §5.2). */
+      const refreshCertificates = React.useCallback(async () => {
+        try {
+          const body = await call('/certificates');
+          setCertificates({
+            ca: body.ca === undefined ? null : body.ca,
+            certificates: Array.isArray(body.certificates) ? body.certificates : [],
+          });
+          setCertError('');
+        } catch (cause) {
+          setCertError(t('error.certificates', { message: cause.message }));
+        }
+      }, [t]);
+
       /** Refresh the snapshot; silent on failure once one is on screen. */
       const refresh = React.useCallback(async (loud) => {
         try {
-          adopt(await call('/state'));
+          const next = await call('/state');
+          adopt(next);
+          /* A gateway without the mTLS half has no `mtls` field: keep the
+           * certificate block hidden and never call its route (old gateway). */
+          if (next.mtls !== undefined && next.mtls !== null) {
+            void refreshCertificates();
+          } else {
+            setCertificates(null);
+          }
         } catch (cause) {
           if (loud === true || latest.current === null) {
             setError(t('error.state', { message: cause.message }));
           }
         }
-      }, [adopt, t]);
+      }, [adopt, refreshCertificates, t]);
 
       React.useEffect(() => {
         if (!open) return undefined;
@@ -577,6 +698,18 @@ window.__ModuleLoader__.load({
       const dsh = (state === null ? null : state.dsh) ?? {};
       const devices = state !== null && Array.isArray(state.devices) ? state.devices : [];
       const pairing = state === null ? null : state.pairing ?? null;
+      /* `mtls` is the gateway-wide switch for this block: old builds do not
+       * send it, and the page must then look exactly as it did before. */
+      const mtls = state === null || state.mtls === undefined || state.mtls === null ? null : state.mtls;
+      const issuedCertificates = certificates !== null && Array.isArray(certificates.certificates)
+        ? certificates.certificates
+        : [];
+      const caFingerprint = mtls === null
+        ? ''
+        : (typeof mtls.caFingerprintPretty === 'string' && mtls.caFingerprintPretty !== ''
+          ? mtls.caFingerprintPretty
+          : (certificates !== null && certificates.ca !== null
+            && typeof certificates.ca.fingerprintPretty === 'string' ? certificates.ca.fingerprintPretty : ''));
 
       const announce = (text) => {
         setNotice(text);
@@ -650,6 +783,107 @@ window.__ModuleLoader__.load({
         } catch (cause) {
           announce(t('error.config', { message: cause.message }));
           await refresh(false);
+        } finally {
+          setBusy('');
+        }
+      };
+
+      /** Copy the CA fingerprint; the clipboard API is absent in some hosts. */
+      const copyFingerprint = async (fingerprint) => {
+        try {
+          if (typeof navigator === 'undefined' || navigator.clipboard === undefined
+            || typeof navigator.clipboard.writeText !== 'function') {
+            throw new Error('clipboard unavailable');
+          }
+          await navigator.clipboard.writeText(fingerprint);
+          announce(t('certificates.copied'));
+        } catch {
+          announce(t('certificates.copyFailed'));
+        }
+      };
+
+      /** Trigger the browser download of the returned PKCS#12 blob. */
+      const downloadPkcs12 = (filename, mediaType, base64) => {
+        if (typeof document === 'undefined') throw new Error(t('certificates.invalidExport'));
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+        const blob = new Blob([bytes], { type: mediaType === '' ? 'application/x-pkcs12' : mediaType });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+      };
+
+      /**
+       * Export one certificate as a password-protected .p12.
+       *
+       * The Host generates the key pair, signs the certificate and returns the
+       * file base64-encoded (docs §5.2); the page only validates the password
+       * (6..64, typed twice) and hands the bytes to the browser.
+       */
+      const exportCertificate = async () => {
+        if (certBusy) return;
+        if (certPassword.length < 6) {
+          announce(t('certificates.passwordShort'));
+          return;
+        }
+        if (certPassword.length > 64) {
+          announce(t('certificates.passwordLong'));
+          return;
+        }
+        if (certPassword !== certPasswordAgain) {
+          announce(t('certificates.passwordMismatch'));
+          return;
+        }
+        setCertBusy(true);
+        try {
+          const name = certName.trim();
+          const body = await call('/certificates', {
+            method: 'POST',
+            body: JSON.stringify(Object.assign({ password: certPassword }, name === '' ? {} : { name })),
+          });
+          const exported = body.export === undefined ? null : body.export;
+          if (exported === null || typeof exported.dataBase64 !== 'string' || exported.dataBase64 === '') {
+            throw new Error(t('certificates.invalidExport'));
+          }
+          const filename = typeof exported.filename === 'string' && exported.filename !== ''
+            ? exported.filename
+            : 'dsh-gateway-client.p12';
+          const mediaType = typeof exported.mediaType === 'string' ? exported.mediaType : 'application/x-pkcs12';
+          downloadPkcs12(filename, mediaType, exported.dataBase64);
+          setCertDialog(false);
+          setCertName('');
+          setCertPassword('');
+          setCertPasswordAgain('');
+          announce(t('certificates.exported', { filename }));
+          await refreshCertificates();
+        } catch (cause) {
+          announce(t('error.export', { message: cause.message }));
+        } finally {
+          setCertBusy(false);
+        }
+      };
+
+      /** Revoke one client certificate; the device loses the public edge at once. */
+      const revokeCertificate = async (certificate) => {
+        const serial = typeof certificate.serial === 'string' ? certificate.serial : '';
+        if (serial === '') return;
+        if (typeof window !== 'undefined' && typeof window.confirm === 'function'
+          && !window.confirm(t('certificates.revokeConfirm', { serial }))) {
+          return;
+        }
+        setBusy('cert:' + serial);
+        try {
+          await call('/certificates?serial=' + encodeURIComponent(serial), { method: 'DELETE' });
+          announce(t('toast.revokedCertificate', { serial }));
+          await refreshCertificates();
+        } catch (cause) {
+          announce(t('error.revokeCertificate', { message: cause.message }));
         } finally {
           setBusy('');
         }
@@ -814,6 +1048,115 @@ window.__ModuleLoader__.load({
               h('span', { className: CLS + '-hint' }, 'mdns · ' + t('switches.restart')))),
           h('p', { className: CLS + '-warn' }, t('footnote')));
 
+        /* The .p12 export dialog. A real modal: it covers the page, closes on
+         * the backdrop, and its password is typed twice so a typo cannot mint a
+         * file nobody can open. It only exists while open, so the default page
+         * (and old-gateway rendering) adds no inputs at all. */
+        const certificateDialog = !certDialog ? null : h('div', {
+          className: CLS + '-modal',
+          role: 'presentation',
+          onClick: (event) => {
+            if (event.target === event.currentTarget) setCertDialog(false);
+          },
+        },
+        h('div', {
+          className: CLS + '-dialog',
+          role: 'dialog',
+          'aria-modal': 'true',
+          'aria-label': t('certificates.dialogTitle'),
+        },
+        h('h5', { className: CLS + '-dialogTitle' }, t('certificates.dialogTitle')),
+        h('p', { className: CLS + '-hint' }, t('certificates.dialogNote')),
+        h('label', { className: CLS + '-field' },
+          h('span', { className: CLS + '-label' }, t('certificates.name')),
+          h('input', {
+            className: CLS + '-input',
+            type: 'text',
+            maxLength: 64,
+            value: certName,
+            placeholder: t('certificates.namePlaceholder'),
+            onChange: (event) => setCertName(event.target.value),
+          })),
+        h('label', { className: CLS + '-field' },
+          h('span', { className: CLS + '-label' }, t('certificates.password')),
+          h('input', {
+            className: CLS + '-input',
+            type: 'password',
+            maxLength: 64,
+            autoComplete: 'new-password',
+            value: certPassword,
+            onChange: (event) => setCertPassword(event.target.value),
+          }),
+          h('span', { className: CLS + '-hint' }, t('certificates.passwordHint'))),
+        h('label', { className: CLS + '-field' },
+          h('span', { className: CLS + '-label' }, t('certificates.passwordConfirm')),
+          h('input', {
+            className: CLS + '-input',
+            type: 'password',
+            maxLength: 64,
+            autoComplete: 'new-password',
+            value: certPasswordAgain,
+            onChange: (event) => setCertPasswordAgain(event.target.value),
+          })),
+        h('div', { className: CLS + '-dialogActions' },
+          h('button', {
+            type: 'button',
+            className: CLS + '-button',
+            disabled: certBusy,
+            onClick: () => setCertDialog(false),
+          }, t('certificates.cancel')),
+          h('button', {
+            type: 'button',
+            className: CLS + '-button',
+            disabled: certBusy,
+            onClick: () => void exportCertificate(),
+          }, certBusy ? t('certificates.exporting') : t('certificates.submit')))));
+
+        const certificatePanel = mtls === null ? null : h('div', { className: CLS + '-panel' },
+          h('div', { className: CLS + '-certFingerprint' },
+            h('span', { className: CLS + '-key' }, t('certificates.ca')),
+            h('span', { className: CLS + '-mono' }, caFingerprint === '' ? '—' : caFingerprint),
+            caFingerprint === '' ? null : h('button', {
+              type: 'button',
+              className: CLS + '-button',
+              onClick: () => void copyFingerprint(caFingerprint),
+            }, t('certificates.copy'))),
+          issuedCertificates.length === 0
+            ? h('p', { className: CLS + '-status' }, t('certificates.empty'))
+            : h('ul', { className: CLS + '-rows' }, issuedCertificates.map((certificate) => {
+              const serial = typeof certificate.serial === 'string' ? certificate.serial : '';
+              const revoked = certificate.revokedAt !== null && certificate.revokedAt !== undefined;
+              const label = typeof certificate.name === 'string' && certificate.name !== ''
+                ? certificate.name
+                : t('certificates.unnamed');
+              return h('li', { className: CLS + '-row', key: serial === '' ? label : serial },
+                h('div', { className: CLS + '-rowLine' },
+                  h('div', { className: CLS + '-rowMain' },
+                    h('span', { className: CLS + '-rowName' },
+                      label,
+                      revoked ? h('span', { className: CLS + '-badge' }, t('certificates.revoked')) : null),
+                    h('span', { className: CLS + '-rowMeta ' + CLS + '-mono' },
+                      serial === '' ? '—' : serial.slice(0, 8)),
+                    h('span', { className: CLS + '-rowMeta' },
+                      t('certificates.expires') + ' ' + formatTime(certificate.notAfter))),
+                  h('div', { className: CLS + '-rowActions' },
+                    revoked ? null : h('button', {
+                      type: 'button',
+                      className: CLS + '-button ' + CLS + '-danger',
+                      disabled: busy === 'cert:' + serial,
+                      onClick: () => void revokeCertificate(certificate),
+                    }, t('certificates.revoke')))));
+            })),
+          h('div', null,
+            h('button', {
+              type: 'button',
+              className: CLS + '-button',
+              disabled: certBusy,
+              onClick: () => setCertDialog(true),
+            }, t('certificates.export'))),
+          certError === '' ? null : h('p', { className: CLS + '-statusError', role: 'alert' }, certError),
+          certificateDialog);
+
         /* Every section, top to bottom, in one scroll.
          *
          * There used to be a tab bar here. Four tabs for a page this short cost
@@ -834,6 +1177,11 @@ window.__ModuleLoader__.load({
               t('section.devices'),
               h('span', { className: CLS + '-sectionCount' }, String(devices.length))),
             devicesPanel),
+          mtls === null ? null : h('section', { className: CLS + '-section' },
+            h('h4', { className: CLS + '-sectionTitle' },
+              t('section.certificates'),
+              h('span', { className: CLS + '-sectionCount' }, String(issuedCertificates.length))),
+            certificatePanel),
           h('section', { className: CLS + '-section' },
             h('h4', { className: CLS + '-sectionTitle' }, t('section.config')),
             configPanel),

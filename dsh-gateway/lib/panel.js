@@ -336,6 +336,7 @@ export async function buildState({
   embedCertificate = false,
   publicUrls = [],
   lanUrls = [],
+  mtls = null,
   uptimeMs = 0,
   lastError = '',
   serverTime = Date.now(),
@@ -362,6 +363,16 @@ export async function buildState({
       publicUrl: typeof config.publicUrl === 'string' ? config.publicUrl : '',
       qrEmbedCertificate: Boolean(config.qrEmbedCertificate),
     },
+    // 公网 mTLS 摘要（契约 §5.2）：没有 PKI 时为 null，字段仍然显式存在。
+    mtls: mtls === null || typeof mtls !== 'object'
+      ? null
+      : {
+          enforced: Boolean(mtls.enforced),
+          caFingerprint: typeof mtls.caFingerprint === 'string' ? mtls.caFingerprint : '',
+          caFingerprintPretty: typeof mtls.caFingerprintPretty === 'string' ? mtls.caFingerprintPretty : '',
+          certificateCount: Number(mtls.certificateCount) || 0,
+          revokedCount: Number(mtls.revokedCount) || 0,
+        },
     publicUrls: Array.isArray(publicUrls) ? publicUrls : [],
     lanUrls: Array.isArray(lanUrls) ? lanUrls : [],
     uptimeMs: Number(uptimeMs) || 0,

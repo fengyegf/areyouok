@@ -34,6 +34,7 @@ import { StreamServer } from './ws.js'
 import { TranslationService } from './translate.js'
 import { MdnsAdvertiser } from './mdns.js'
 import { ensureTlsMaterial } from './tls.js'
+import { ensureClientPki } from './mtls.js'
 import { mountPanel } from './panel-routes.js'
 import { watchTurnEnds } from './turns.js'
 import { ActivityTracker, watchSessionEvents } from './activity.js'
@@ -111,6 +112,8 @@ export function createGateway(options) {
   let api = null
   /** @type {MdnsAdvertiser|null} */
   let mdns = null
+  /** 客户端 PKI（公网 mTLS）；创建失败时为 null，公网边降级关闭。 @type {import('./mtls.js').ClientPki|null} */
+  let pki = null
   /** @type {DshLoopbackClient|null} */
   let dsh = null
   /** @type {(() => void)|null} */
@@ -262,6 +265,23 @@ export function createGateway(options) {
       const tls = config.httpsPort === 0 ? null : await ensureTlsMaterial(dir, logger)
       if (disposed) return ports
 
+      /**
+       * 客户端 PKI 无条件创建（即使 httpsPort=0）：面板的证书列表/导出仍然可用，
+       * 而公网边只有在 TLS + PKI 都就绪时才启动（契约 §4.4）。
+       * 创建失败 → 记 error、公网边降级关闭、LAN 边照常；/v1/pki/* 由 http.js 回 503。
+       */
+      try {
+        pki = await ensureClientPki({ dir, config, logger })
+      } catch (error) {
+        pki = null
+        logger.error('client PKI unavailable: ' + (error?.message ?? error))
+      }
+      auth.pki = pki
+      if (pki === null && config.httpsPort > 0) {
+        logger.warn('public mTLS is unavailable; the public listener stays disabled (LAN HTTP is unaffected)')
+      }
+      if (disposed) return ports
+
       ws = new StreamServer({ config, logger, hub, auth })
       api = new ApiServer({
         ctx,
@@ -270,6 +290,7 @@ export function createGateway(options) {
         hub,
         auth,
         tls,
+        pki,
         dir,
         translate,
         activity,
@@ -347,6 +368,11 @@ export function createGateway(options) {
       // ignore
     }
     try {
+      await pki?.close()
+    } catch {
+      // ignore
+    }
+    try {
       await translate.close()
     } catch {
       // ignore
@@ -376,6 +402,7 @@ export function createGateway(options) {
     get api() { return api },
     get ws() { return ws },
     get dsh() { return dsh },
+    get pki() { return pki },
     get mdns() { return mdns },
     get ports() { return ports },
     get disposed() { return disposed },

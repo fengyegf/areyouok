@@ -108,9 +108,10 @@ describe('in-app panel routes', { skip: reason }, () => {
   })
 
   it('mounts the panel routes on the host web server', () => {
-    // `pairing` answers GET and POST, so the table holds four paths for five
-    // method/path pairs. Nothing else is claimed.
+    // `pairing` and `certificates` answer several methods on one path, so the
+    // table holds five paths. Nothing else is claimed.
     assert.deepEqual([...ctx.routes.keys()].sort(), [
+      '/plugins/dsh-gateway/certificates',
       '/plugins/dsh-gateway/config',
       '/plugins/dsh-gateway/devices',
       '/plugins/dsh-gateway/pairing',
@@ -128,10 +129,71 @@ describe('in-app panel routes', { skip: reason }, () => {
     assert.equal(typeof response.json.config?.lanRequirePairing, 'boolean')
     assert.equal(typeof response.json.name, 'string')
     assert.equal(typeof response.json.fingerprintPretty, 'string')
+    // mTLS 摘要（契约 §5.2）：这个 harness 的 httpsPort=0，所以未强制但 PKI 仍在。
+    assert.equal(response.json.mtls.enforced, false)
+    assert.match(response.json.mtls.caFingerprint, /^[0-9a-f]{64}$/)
+    assert.equal(typeof response.json.mtls.caFingerprintPretty, 'string')
+    assert.equal(typeof response.json.mtls.certificateCount, 'number')
+    assert.equal(typeof response.json.mtls.revokedCount, 'number')
     // Not the `/v1` wildcard: this route is for the Web UI on its own origin.
     assert.equal(response.headers.get('access-control-allow-origin'), null)
     assert.equal(response.headers.get('cache-control'), 'no-store')
     assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
+  })
+
+  it('serves the mTLS certificate list and exports a PKCS#12', async () => {
+    const list = await request(host.base, '/plugins/dsh-gateway/certificates')
+    assert.equal(list.status, 200)
+    assert.equal(list.json.ok, true)
+    assert.match(list.json.ca.fingerprint, /^[0-9a-f]{64}$/)
+    assert.equal(typeof list.json.ca.certificate, 'string')
+    assert.ok(Array.isArray(list.json.certificates))
+    const before = list.json.certificates.length
+
+    const created = await request(host.base, '/plugins/dsh-gateway/certificates', {
+      method: 'POST',
+      body: { name: '备用手机', deviceId: 'panel-export-1', password: 'panel-pass' },
+    })
+    assert.equal(created.status, 200, created.text)
+    assert.equal(created.json.ok, true)
+    assert.match(created.json.certificate.serial, /^[0-9A-F]+$/)
+    assert.equal(created.json.export.mediaType, 'application/x-pkcs12')
+    assert.equal(
+      created.json.export.filename,
+      'dsh-gateway-client-' + created.json.certificate.serial + '.p12',
+    )
+    assert.ok(Buffer.from(created.json.export.dataBase64, 'base64').length > 100)
+
+    const after = await request(host.base, '/plugins/dsh-gateway/certificates')
+    assert.equal(after.json.certificates.length, before + 1)
+
+    // 短密码在路由层被拒（6~64 位）。
+    const short = await request(host.base, '/plugins/dsh-gateway/certificates', {
+      method: 'POST',
+      body: { password: '12345' },
+    })
+    assert.equal(short.status, 400)
+    assert.equal(short.json.error.code, 'invalid_request')
+
+    // 撤销：幂等，第一次 true，第二次 false。
+    const serial = created.json.certificate.serial
+    const revoked = await request(
+      host.base,
+      '/plugins/dsh-gateway/certificates?serial=' + encodeURIComponent(serial),
+      { method: 'DELETE' },
+    )
+    assert.equal(revoked.status, 200)
+    assert.equal(revoked.json.revoked, true)
+    assert.equal(revoked.json.serial, serial)
+    const again = await request(
+      host.base,
+      '/plugins/dsh-gateway/certificates?serial=' + encodeURIComponent(serial),
+      { method: 'DELETE' },
+    )
+    assert.equal(again.json.revoked, false)
+
+    const missing = await request(host.base, '/plugins/dsh-gateway/certificates', { method: 'DELETE' })
+    assert.equal(missing.status, 400)
   })
 
   it('POST pairing mints a code with a scannable matrix and no certificate on LAN', async () => {

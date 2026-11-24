@@ -79,12 +79,15 @@ export class AuthService {
    * @param {Record<string, any>} deps.config - normalized gateway config.
    * @param {{info?:Function,warn?:Function,error?:Function,debug?:Function}} [deps.logger]
    * @param {string} [deps.dir] - data directory (unused directly; hub persists there).
+   * @param {import('./mtls.js').ClientPki|null} [deps.pki] - client PKI (revocation linkage; may be null).
    */
-  constructor({ hub, config, logger, dir }) {
+  constructor({ hub, config, logger, dir, pki }) {
     this.hub = hub
     this.config = config ?? {}
     this.logger = logger ?? {}
     this.dir = dir ?? ''
+    /** Client PKI (mTLS). index.js injects it once the CA is ready; may stay null. */
+    this.pki = pki ?? null
     /** Runtime override of the config switch (admin PATCH; memory only). */
     this.lanRequirePairing = Boolean(this.config.lanRequirePairing)
     /** @type {Map<string, {code:string,createdAt:number,expiresAt:number,urls:string[],fingerprint:string|null}>} */
@@ -129,20 +132,40 @@ export class AuthService {
 
   /**
    * Authorize one request/upgrade before any body is read.
-   * @param {{remoteAddress?:string, localPort?:number, headers?:object, path?:string}} input
+   *
+   * mTLS rules (契约 §4.3):
+   *   - 公网边：TLS 层已经 requestCert + rejectUnauthorized（无证书 = 握手失败）；
+   *     这里再检查 clientCertificate 是纵深防御（WS upgrade 走同一 guard）。
+   *   - 公网边 /v1/pki/*：先判边再判路由，一律 403 forbidden_source（即使带 token）。
+   *   - LAN 边 /v1/pki/*：lanRequirePairing=false 直接允许（局域网无条件信任域），
+   *     true 时要求有效 Bearer，否则 401（否则局域网设备能借证书绕过配对开关）。
+   *
+   * @param {{remoteAddress?:string, localPort?:number, headers?:object, path?:string,
+   *   clientCertificate?:object|null}} input
    * @returns {{ok:true, kind:'loopback'|'lan'|'public', device:object|null}
    *          |{ok:false, status:number, code:string, message:string}}
    */
-  guard({ remoteAddress, localPort, headers, path } = {}) {
+  guard({ remoteAddress, localPort, headers, path, clientCertificate } = {}) {
     const kind = classifyAddress(remoteAddress)
     const routePath = typeof path === 'string' ? path : ''
     const securePort = Number(this.config.httpsPort) > 0 ? Number(this.config.httpsPort) : 0
     const onSecurePort = securePort !== 0 && Number(localPort) === securePort
     const isPair = routePath === '/v1/pair'
+    const isPkiRoute = routePath === '/v1/pki' || routePath.startsWith('/v1/pki/')
 
     if (onSecurePort) {
-      // Public HTTPS edge: pairing is the only pre-auth route; everything
-      // else (including loopback) must present a device token.
+      // Public HTTPS edge: the TLS handshake already demanded a client
+      // certificate; this check keeps the application layer honest even if a
+      // future TLS option is relaxed.
+      if (clientCertificate === null || clientCertificate === undefined) {
+        return deny(403, 'client_certificate_required', 'a client certificate is required on the public port')
+      }
+      // Edge first, route second: the public port never issues certificates.
+      if (isPkiRoute) {
+        return deny(403, 'forbidden_source', 'client certificates are issued on the LAN port only')
+      }
+      // Pairing is the only pre-auth route; everything else (including
+      // loopback) must present a device token.
       if (isPair) return { ok: true, kind, device: null }
       const device = this.deviceForHeaders(headers)
       if (device !== null) return { ok: true, kind, device }
@@ -152,6 +175,12 @@ export class AuthService {
     // LAN HTTP edge (`:7788`).
     if (kind === 'public') {
       return deny(403, 'forbidden_source', 'the LAN port only accepts private source addresses')
+    }
+    if (isPkiRoute) {
+      if (!this.lanRequirePairing) return { ok: true, kind, device: null }
+      const device = this.deviceForHeaders(headers)
+      if (device !== null) return { ok: true, kind, device }
+      return deny(401, 'unauthenticated', 'this gateway requires a paired device token on the LAN')
     }
     if (isPair) return { ok: true, kind, device: null }
     if (kind === 'loopback') return { ok: true, kind, device: null }
@@ -334,6 +363,12 @@ export class AuthService {
    */
   revoke(deviceId) {
     if (typeof deviceId !== 'string' || deviceId === '') return false
+    // 设备令牌撤销联动客户端证书：公网 mTLS 的设备边界与 Bearer 设备表保持一致。
+    try {
+      this.pki?.revokeByDevice?.(deviceId)
+    } catch (error) {
+      this.logger.warn?.(`client certificate revocation failed: ${error?.message ?? error}`)
+    }
     const existed = this.#getDevice(deviceId) !== null
     try {
       this.hub.removeDevice?.(deviceId)
