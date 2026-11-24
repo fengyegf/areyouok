@@ -1,6 +1,9 @@
 package com.catmoecircle.areyouok.gateway.transport
 
 import com.catmoecircle.areyouok.gateway.protocol.AnswerRequest
+import com.catmoecircle.areyouok.gateway.protocol.ClientCertCaResponse
+import com.catmoecircle.areyouok.gateway.protocol.ClientCertEnrollRequest
+import com.catmoecircle.areyouok.gateway.protocol.ClientCertEnrollResponse
 import com.catmoecircle.areyouok.gateway.protocol.CreateSessionRequest
 import com.catmoecircle.areyouok.gateway.protocol.CreateSessionResponse
 import com.catmoecircle.areyouok.gateway.protocol.ErrorBody
@@ -348,6 +351,36 @@ class OkHttpGatewayApi(
             token = null,
         )
         return decodeOrThrow<PairResponse>(text)
+    }
+
+    /**
+     * GET /v1/pki/ca：客户端证书 CA（契约 §5.1）。
+     *
+     * 公网边 403、老网关 404 都翻成 [GatewayException]；自动领证调用方静默跳过。
+     */
+    override suspend fun caCertificate(): ClientCertCaResponse {
+        val text = get("/pki/ca")
+        val response = decodeOrThrow<ClientCertCaResponse>(text)
+        throwIfNotOk(response.ok, text, "客户端证书 CA 不可用")
+        return response
+    }
+
+    /**
+     * POST /v1/pki/enroll：CSR 换客户端证书（契约 §5.1）。
+     *
+     * 只走当前网关地址（局域网边）；带当前设备令牌（`lanRequirePairing` 时
+     * 网关要求 Bearer）。403/404/429 都翻成 [GatewayException]，调用方静默跳过。
+     */
+    override suspend fun enrollClientCertificate(
+        csrPem: String,
+        deviceName: String?,
+        deviceId: String?,
+    ): ClientCertEnrollResponse {
+        val body = ClientCertEnrollRequest(csr = csrPem, deviceId = deviceId, deviceName = deviceName)
+        val text = post("/pki/enroll", json.encodeToString(ClientCertEnrollRequest.serializer(), body))
+        val response = decodeOrThrow<ClientCertEnrollResponse>(text)
+        throwIfNotOk(response.ok, text, "领取客户端证书失败")
+        return response
     }
 
     // ------------------------------------------------------------ HTTP 细节

@@ -1,5 +1,6 @@
 package com.catmoecircle.areyouok.gateway.transport
 
+import com.catmoecircle.areyouok.gateway.cert.ClientCerts
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -9,6 +10,7 @@ import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import javax.net.ssl.HostnameVerifier
 import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.KeyManager
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSession
 import javax.net.ssl.SSLSocketFactory
@@ -94,10 +96,23 @@ object GatewayTls {
     /** 同时信任系统 CA 与已固定自签证书的 TrustManager。 */
     val trustManager: X509TrustManager by lazy { PinnedTrustManager(defaultTrustManager()) }
 
-    /** 使用 [trustManager] 的 SSLSocketFactory（OkHttp 建连时使用）。 */
+    /**
+     * 使用 [trustManager] + 客户端证书 KeyManager 的 SSLSocketFactory（OkHttp 建连时使用）。
+     *
+     * 公网边强制双向 TLS：服务端发 `CertificateRequest` 时，JSSE 通过
+     * [ClientCerts.keyManager] 选一张本机证书出示。服务端证书固定逻辑
+     * （[trustManager] / [hostnameVerifier]）完全不变；本机没有客户端证书时
+     * KeyManager 返回 null，行为与改造前一致（局域网 HTTP 与老网关不受影响）。
+     */
     val socketFactory: SSLSocketFactory by lazy {
         SSLContext.getInstance("TLS")
-            .apply { init(null, arrayOf<TrustManager>(trustManager), SecureRandom()) }
+            .apply {
+                init(
+                    arrayOf<KeyManager>(ClientCerts.keyManager()),
+                    arrayOf<TrustManager>(trustManager),
+                    SecureRandom(),
+                )
+            }
             .socketFactory
     }
 

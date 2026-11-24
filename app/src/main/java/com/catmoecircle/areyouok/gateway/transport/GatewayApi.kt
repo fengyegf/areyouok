@@ -1,5 +1,7 @@
 package com.catmoecircle.areyouok.gateway.transport
 
+import com.catmoecircle.areyouok.gateway.protocol.ClientCertCaResponse
+import com.catmoecircle.areyouok.gateway.protocol.ClientCertEnrollResponse
 import com.catmoecircle.areyouok.gateway.protocol.CreateSessionResponse
 import com.catmoecircle.areyouok.gateway.protocol.EventsPage
 import com.catmoecircle.areyouok.gateway.protocol.HealthResponse
@@ -200,6 +202,38 @@ interface GatewayApi {
     ): PairResponse
 
     /**
+     * GET /v1/pki/ca：本网关的客户端证书 CA（契约 §5.1，只有局域网边可达）。
+     *
+     * 自动领证前用它判断「本机是否已有该 CA 签发的证书」；旧网关没有这个
+     * 端点时抛 [GatewayException.CODE_UNSUPPORTED]，自动领证静默跳过。
+     */
+    suspend fun caCertificate(): ClientCertCaResponse = throw GatewayException(
+        GatewayException.CODE_UNSUPPORTED,
+        0,
+        "当前网关不支持客户端证书",
+    )
+
+    /**
+     * POST /v1/pki/enroll：用本机生成的 CSR 换一张客户端证书（契约 §5.1，仅局域网边）。
+     *
+     * 私钥不出手机，只把 CSR 交给网关。旧网关/公网边返回 404/403 时抛
+     * [GatewayException]，自动领证据此静默跳过，不阻塞连接。
+     *
+     * `deviceId` 是**追加的可选参数**（默认 null，两参调用保持不变）：带上它
+     * 网关才会把同 deviceId 的旧证书标成撤销（续期语义），并把证书绑到设备上
+     * 以便面板"按设备撤销"。自动领证会传本机 deviceId（同时作为 CSR 的 CN）。
+     */
+    suspend fun enrollClientCertificate(
+        csrPem: String,
+        deviceName: String?,
+        deviceId: String? = null,
+    ): ClientCertEnrollResponse = throw GatewayException(
+        GatewayException.CODE_UNSUPPORTED,
+        0,
+        "当前网关不支持客户端证书",
+    )
+
+    /**
      * POST /v1/translate：把一段文本交给网关内置的翻译服务（思考链专用）。
      *
      * 长文本由调用方先分段（见 `splitForTranslation`），这里只发一段；
@@ -245,6 +279,49 @@ fun Throwable.toUserMessage(): String = when (this) {
     is java.net.UnknownHostException -> "无法解析网关地址"
     is java.net.ConnectException -> "无法连接网关，请确认同一局域网"
     is java.net.SocketTimeoutException -> "网关响应超时"
-    is javax.net.ssl.SSLException -> "TLS 握手失败（证书指纹不匹配？）"
+    is javax.net.ssl.SSLException -> sslUserMessage(this)
     else -> message ?: javaClass.simpleName
+}
+
+/** alert 42/44/45/46/48：bad_certificate / certificate_revoked / … / unknown_ca。 */
+private val ALERT_CERT_PATTERN = Regex("alert[: ]+(42|44|45|46|48)\\b")
+
+/**
+ * TLS 握手失败的中文提示（公网边强制双向证书后的两种典型失败）。
+ *
+ * - 服务端要客户端证书但本机没有：alert 116 `certificate_required`；
+ * - 本机证书被撤销/过期/不被该 CA 接受：alert 42/44/45/46/48 或 bad_certificate。
+ *
+ * JSSE 有时把细节藏在 cause 里，所以把整条 cause 链上的 message 拼起来匹配；
+ * 匹配不到时保持原来的「证书指纹不匹配？」文案（服务端证书固定失败的语义不变）。
+ */
+internal fun sslUserMessage(error: javax.net.ssl.SSLException): String {
+    val messages = mutableListOf<String>()
+    var current: Throwable? = error
+    while (current != null) {
+        current.message?.let { messages += it }
+        current = current.cause
+    }
+    val text = messages.joinToString(" ").lowercase()
+    return when {
+        text.contains("certificate required") ||
+            text.contains("certificate_required") ||
+            text.contains("alert 116") ||
+            text.contains("alert: 116") ->
+            "该网关要求客户端证书：请回到局域网自动领取，或从网关导出 .p12 后在此导入"
+
+        text.contains("bad certificate") ||
+            text.contains("bad_certificate") ||
+            text.contains("certificate revoked") ||
+            text.contains("certificate_revoked") ||
+            text.contains("certificate expired") ||
+            text.contains("certificate_expired") ||
+            text.contains("certificate unknown") ||
+            text.contains("certificate_unknown") ||
+            text.contains("unknown_ca") ||
+            ALERT_CERT_PATTERN.containsMatchIn(text) ->
+            "客户端证书已失效或被撤销，请重新领证"
+
+        else -> "TLS 握手失败（证书指纹不匹配？）"
+    }
 }

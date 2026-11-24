@@ -37,6 +37,66 @@ data class HealthResponse(
     val lan: Boolean = false,
     val paired: Boolean = false,
     val uptimeMs: Long? = null,
+    /**
+     * 公网 mTLS 状态（契约 §4.2；老网关没有该字段）。
+     *
+     * `required` 表示公网端口开着（强制双向证书）；`caFingerprint` 是本实例
+     * 私有 CA 的 SHA-256（小写 hex）。客户端主要用后者做「是不是同一个 CA」的判断。
+     */
+    val mtls: ClientCertHealth? = null,
+)
+
+/** `/v1/health.mtls`（契约 §4.2）。 */
+@Serializable
+data class ClientCertHealth(
+    val required: Boolean = false,
+    val caFingerprint: String? = null,
+)
+
+/**
+ * POST /v1/pki/enroll 请求（契约 §5.1，仅局域网边）。
+ *
+ * 私钥不出手机，这里只带 CSR；`deviceId` 由网关用于撤销/续期（自动领证会带上，
+ * CSR 的 CN 也已经是 deviceId）。
+ */
+@Serializable
+data class ClientCertEnrollRequest(
+    val csr: String,
+    val deviceId: String? = null,
+    val deviceName: String? = null,
+)
+
+/**
+ * POST /v1/pki/enroll 响应（契约 §5.1）。
+ *
+ * 字段名与网关 JSON 完全一致；`ok` 放在最后并默认 true，老式 `{ok:false}`
+ * 信封也能被解码出来当失败处理。
+ */
+@Serializable
+data class ClientCertEnrollResponse(
+    val certificate: String = "",
+    val caCertificate: String = "",
+    val caFingerprint: String = "",
+    val serial: String = "",
+    val notAfter: Long = 0L,
+    val deviceId: String? = null,
+    val name: String? = null,
+    val ok: Boolean = true,
+)
+
+/** `GET /v1/pki/ca` 响应里的 CA 信息（契约 §5.1）。 */
+@Serializable
+data class ClientCertAuthority(
+    val certificate: String = "",
+    val fingerprint: String = "",
+    val fingerprintPretty: String? = null,
+)
+
+/** `GET /v1/pki/ca` 响应（契约 §5.1，仅局域网边）。 */
+@Serializable
+data class ClientCertCaResponse(
+    val ok: Boolean = false,
+    val ca: ClientCertAuthority? = null,
 )
 
 /** 工作区/项目（DSH 原样形状：主键是 `workspaceId`，展示名在 `title`/`path`）。 */

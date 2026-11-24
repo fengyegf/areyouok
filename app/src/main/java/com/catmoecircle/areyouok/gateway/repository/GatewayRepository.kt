@@ -292,7 +292,9 @@ class GatewayRepository(
                     throw cancelled
                 } catch (error: Throwable) {
                     attempt++
-                    val message = error.toUserMessage()
+                    // 带上目标地址：扫码/发现连不上时能一眼看出打的到底是哪个 URL
+                    // （局域网 http://<ip>:7788 还是公网 https://[ipv6]:7789）。
+                    val message = error.toUserMessage() + "（" + endpoint.baseUrl + "）"
                     if (attempt >= MAX_BOOTSTRAP_ATTEMPTS) {
                         _connection.value = _connection.value.copy(
                             phase = ConnectionPhase.ERROR,

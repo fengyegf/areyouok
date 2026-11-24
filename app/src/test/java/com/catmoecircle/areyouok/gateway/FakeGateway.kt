@@ -1,5 +1,7 @@
 package com.catmoecircle.areyouok.gateway
 
+import com.catmoecircle.areyouok.gateway.protocol.ClientCertCaResponse
+import com.catmoecircle.areyouok.gateway.protocol.ClientCertEnrollResponse
 import com.catmoecircle.areyouok.gateway.protocol.CreateSessionResponse
 import com.catmoecircle.areyouok.gateway.protocol.EventsPage
 import com.catmoecircle.areyouok.gateway.protocol.HealthResponse
@@ -21,6 +23,7 @@ import com.catmoecircle.areyouok.gateway.protocol.TranslationProvidersResponse
 import com.catmoecircle.areyouok.gateway.protocol.EventFrame
 import com.catmoecircle.areyouok.gateway.protocol.Workspace
 import com.catmoecircle.areyouok.gateway.transport.GatewayApi
+import com.catmoecircle.areyouok.gateway.transport.GatewayException
 import com.catmoecircle.areyouok.gateway.transport.GatewayTransport
 import com.catmoecircle.areyouok.gateway.transport.StreamUpdate
 import kotlinx.coroutines.flow.Flow
@@ -53,6 +56,18 @@ class FakeGatewayApi : GatewayApi {
     var createSessionResponse = CreateSessionResponse(ok = true, sessionId = "s-new")
     var pairResponse = PairResponse(ok = true, deviceToken = "tok-123")
     var error: Throwable? = null
+
+    /** `GET /v1/pki/ca` 的应答；null 模拟「老网关没有该端点」（unsupported）。 */
+    var clientCaResponse: ClientCertCaResponse? = null
+
+    /** `POST /v1/pki/enroll` 的应答；null 模拟「老网关没有该端点」。 */
+    var clientEnrollResponse: ClientCertEnrollResponse? = null
+
+    /** 只在 pki 证书端点时抛的失败注入（模拟 403/网络失败）。 */
+    var clientCertError: Throwable? = null
+
+    /** 每次 `POST /v1/pki/enroll` 的入参：(csrPem, deviceName, deviceId)。 */
+    val enrollRequests = mutableListOf<Triple<String, String?, String?>>()
 
     /** 只在 `POST /v1/translate` 时抛的失败注入（不影响 providers 探测）。 */
     var translationError: Throwable? = null
@@ -258,6 +273,31 @@ class FakeGatewayApi : GatewayApi {
     ): PairResponse {
         maybeThrow()
         return pairResponse
+    }
+
+    override suspend fun caCertificate(): ClientCertCaResponse {
+        maybeThrow()
+        clientCertError?.let { throw it }
+        return clientCaResponse ?: throw GatewayException(
+            GatewayException.CODE_UNSUPPORTED,
+            0,
+            "当前网关不支持客户端证书",
+        )
+    }
+
+    override suspend fun enrollClientCertificate(
+        csrPem: String,
+        deviceName: String?,
+        deviceId: String?,
+    ): ClientCertEnrollResponse {
+        maybeThrow()
+        enrollRequests += Triple(csrPem, deviceName, deviceId)
+        clientCertError?.let { throw it }
+        return clientEnrollResponse ?: throw GatewayException(
+            GatewayException.CODE_UNSUPPORTED,
+            0,
+            "当前网关不支持客户端证书",
+        )
     }
 
     override suspend fun translate(

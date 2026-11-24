@@ -2,11 +2,19 @@ package com.catmoecircle.areyouok.gateway
 
 import android.content.Context
 import android.os.Build
+import android.util.Log
+import com.catmoecircle.areyouok.gateway.cert.ClientCertEnrollment
+import com.catmoecircle.areyouok.gateway.cert.ClientCertStore
+import com.catmoecircle.areyouok.gateway.cert.ClientCertificate
+import com.catmoecircle.areyouok.gateway.cert.ClientCerts
+import com.catmoecircle.areyouok.gateway.cert.KeystoreClientCertStore
+import com.catmoecircle.areyouok.gateway.cert.Pkcs12Tools
 import com.catmoecircle.areyouok.gateway.discovery.GatewayDiscovery
 import com.catmoecircle.areyouok.gateway.pairing.KeystoreTokenStore
 import com.catmoecircle.areyouok.gateway.pairing.PairInvite
 import com.catmoecircle.areyouok.gateway.pairing.PairingManager
 import com.catmoecircle.areyouok.gateway.pairing.TokenStore
+import com.catmoecircle.areyouok.gateway.repository.ConnectionPhase
 import com.catmoecircle.areyouok.gateway.repository.ConnectionState
 import com.catmoecircle.areyouok.gateway.repository.GatewayRepository
 import com.catmoecircle.areyouok.gateway.transport.GatewayEndpoint
@@ -15,8 +23,11 @@ import com.catmoecircle.areyouok.gateway.transport.GatewayTls
 import com.catmoecircle.areyouok.gateway.transport.OkHttpGatewayTransport
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -35,6 +46,10 @@ class GatewayRuntime private constructor(context: Context) {
 
     val settings: GatewaySettings = GatewaySettings(appContext)
     val tokenStore: TokenStore = KeystoreTokenStore(appContext)
+
+    /** 客户端证书持久化（公网强制双向 TLS，见 `docs/dsh-gateway-mtls.md` §7.1）。 */
+    val clientCerts: ClientCertStore = KeystoreClientCertStore(appContext)
+
     val discovery: GatewayDiscovery = GatewayDiscovery(appContext, scope)
 
     private val httpClients: Pair<OkHttpClient, OkHttpClient> = OkHttpGatewayTransport.clients()
@@ -55,6 +70,17 @@ class GatewayRuntime private constructor(context: Context) {
     val repository: GatewayRepository = GatewayRepository(transport, scope)
 
     val connection: StateFlow<ConnectionState> get() = repository.connection
+
+    /** 自动领证失败过的「网关 + CA 指纹」：一次安装里不重复打端点（重连不刷屏）。 */
+    private val autoEnrollFailedFor: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    private val autoEnrollRunning = AtomicBoolean(false)
+
+    init {
+        // 进程启动时把持久化的客户端证书装进内存表：握手时 KeyManager 直接可用。
+        ClientCerts.load(clientCerts)
+        observeAutoEnroll()
+    }
 
     /** 扫码/深链带进来的配对邀请，等待用户确认。 */
     private val _pendingInvite = MutableStateFlow<PairInvite?>(null)
@@ -195,7 +221,109 @@ class GatewayRuntime private constructor(context: Context) {
         pairing.forget(baseUrl)
     }
 
+    // ------------------------------------------------------ 客户端证书（公网 mTLS）
+
+    /** 设置页「客户端证书」列表（内存表快照，按安装顺序）。 */
+    fun clientCertificateSummary(): List<ClientCertificate> = ClientCerts.snapshot()
+
+    /**
+     * 从文件导入网关导出的 .p12（A7）。
+     *
+     * 先校验能被 PKCS#12 打开，再装进内存表并加密落盘。
+     *
+     * @throws IllegalArgumentException 密码错误/文件损坏/没有私钥（中文消息，可直接展示）
+     */
+    fun importClientCertificate(bytes: ByteArray, password: String): ClientCertificate {
+        val certificate = ClientCertEnrollment.fromPkcs12(bytes, password)
+        if (!ClientCerts.install(certificate)) {
+            throw IllegalArgumentException("证书无法导入：PKCS#12 里的私钥与证书链无法使用")
+        }
+        clientCerts.save(certificate)
+        return certificate
+    }
+
+    /** 删除一张本机客户端证书；不存在时返回 false。 */
+    fun removeClientCertificate(serial: String): Boolean {
+        if (ClientCerts.snapshot().none { it.serial == serial }) return false
+        ClientCerts.remove(serial)
+        clientCerts.remove(serial)
+        return true
+    }
+
+    /**
+     * 局域网连接成功后自动领证（A9）+ 快过期自动续期。
+     *
+     * 只监听「刚连上」这一瞬：连接态后续的 serverSeq 更新不再触发。整套流程
+     * 都吞异常：老网关没有端点（404/403）、网络失败、续期失败都只记日志，
+     * 不阻塞连接与聊天。
+     */
+    private fun observeAutoEnroll() {
+        scope.launch {
+            var wasConnected = false
+            repository.connection.collect { state ->
+                if (state.phase != ConnectionPhase.CONNECTED) {
+                    wasConnected = false
+                    return@collect
+                }
+                if (wasConnected) return@collect
+                wasConnected = true
+                val endpoint = state.endpoint ?: return@collect
+                // 领证要发 HTTP 请求：放到独立协程，别堵住连接状态流。
+                scope.launch { maybeAutoEnroll(endpoint) }
+            }
+        }
+    }
+
+    /** 真正执行「查 CA → 判断是否缺证书/快过期 → CSR 领证 → 覆盖本地条目」。 */
+    private suspend fun maybeAutoEnroll(endpoint: GatewayEndpoint) {
+        // 只有局域网明文边（http://）能领证；公网边（https）没有 /v1/pki/* 路由。
+        if (!endpoint.baseUrl.startsWith("http://", ignoreCase = true)) return
+        if (!autoEnrollRunning.compareAndSet(false, true)) return
+        try {
+            val ca = try {
+                transport.api.caCertificate().ca
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (error: Throwable) {
+                // 老网关没有该端点（404/403）：静默跳过，不影响连接。
+                Log.i(TAG, "网关没有客户端证书端点，跳过自动领证", error)
+                return
+            }
+            val caCertificate = Pkcs12Tools.parseCertificatePem(ca?.certificate) ?: return
+            val issuerDn = Pkcs12Tools.rfc2253(caCertificate.subjectX500Principal)
+            val fingerprint = GatewayTls.normalizeFingerprint(ca?.fingerprint)
+                ?: GatewayTls.fingerprintOf(caCertificate)
+            val cacheKey = endpoint.serverId + "|" + fingerprint
+            if (autoEnrollFailedFor.contains(cacheKey)) return
+            // 该 CA 下的证书还在有效期内（距过期 > 30 天）就不动它。
+            val now = System.currentTimeMillis()
+            if (ClientCerts.hasFreshCertificate(issuerDn, now, ClientCertEnrollment.RENEW_BEFORE_MS)) return
+
+            // 缺证书，或最近一张不足 30 天/已过期：重新走一次 CSR 领证。
+            // 网关会撤销同 deviceId 的旧证书；本机按 issuer 覆盖旧条目（续期是本机行为）。
+            val certificate = ClientCertEnrollment.enroll(transport.api, tokenStore.deviceId(), deviceName)
+            if (certificate == null) {
+                autoEnrollFailedFor += cacheKey
+                Log.w(TAG, "自动领取客户端证书失败（不影响连接），设置页可手动导入 .p12")
+                return
+            }
+            clientCerts.save(certificate)
+            ClientCerts.serialsForIssuer(issuerDn)
+                .filter { it != certificate.serial }
+                .forEach { stale ->
+                    ClientCerts.remove(stale)
+                    clientCerts.remove(stale)
+                }
+            autoEnrollFailedFor -= cacheKey
+            Log.i(TAG, "已自动领取客户端证书 " + certificate.serial + "（CA " + certificate.issuer + "）")
+        } finally {
+            autoEnrollRunning.set(false)
+        }
+    }
+
     companion object {
+        private const val TAG = "GatewayRuntime"
+
         @Volatile
         private var instance: GatewayRuntime? = null
 

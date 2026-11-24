@@ -142,6 +142,41 @@
     <string name="gateway_scan_prompt">对准电脑上的 DSH 网关二维码</string>
     <string name="gateway_scan_failed">二维码里没有可用的网关地址，请手动输入</string>
 
+    <!-- 客户端证书（公网 mTLS）：设置页列表 / 从 .p12 导入 -->
+    <string name="gateway_cert_title">客户端证书</string>
+    <string name="gateway_cert_root_desc">公网访问必须双向证书</string>
+    <string name="gateway_cert_intro">公网访问必须双向证书（mTLS）：没有本网关签发的客户端证书时，公网端口会在 TLS 握手阶段直接断开。局域网连接成功后 App 会自动领取；也可以从网关导出的 .p12 文件手动导入。</string>
+    <string name="gateway_cert_section_list">已导入证书</string>
+    <string name="gateway_cert_loading">正在读取证书…</string>
+    <string name="gateway_cert_empty">尚未导入客户端证书</string>
+    <string name="gateway_cert_empty_desc">回到局域网连一次网关会自动领取，也可以点下面的「从文件导入」。</string>
+    <string name="gateway_cert_serial_expiry">序列号 %1$s · 到期 %2$s</string>
+    <string name="gateway_cert_serial_unknown">未知</string>
+    <string name="gateway_cert_state_expired">已过期，请重新领证或导入</string>
+    <string name="gateway_cert_state_expiring">即将到期，建议重新领证</string>
+    <string name="gateway_cert_delete">删除</string>
+    <string name="gateway_cert_delete_desc">删除证书 %1$s</string>
+    <string name="gateway_cert_delete_title">删除客户端证书？</string>
+    <string name="gateway_cert_delete_body">删除「%1$s」后，这台设备将无法通过公网访问该网关，需要重新领取或导入。确定删除吗？</string>
+    <string name="gateway_cert_delete_confirm">删除</string>
+    <string name="gateway_cert_cancel">取消</string>
+    <string name="gateway_cert_section_import">导入</string>
+    <string name="gateway_cert_import">从文件导入</string>
+    <string name="gateway_cert_import_desc">选择网关导出的 .p12 / .pfx 文件，需要导出时设置的密码</string>
+    <string name="gateway_cert_password_title">输入证书密码</string>
+    <string name="gateway_cert_password_body">请输入网关导出 .p12 时设置的密码，至少 6 位。</string>
+    <string name="gateway_cert_password_label">密码</string>
+    <string name="gateway_cert_password_too_short">密码至少 6 位</string>
+    <string name="gateway_cert_import_confirm">导入</string>
+    <string name="gateway_cert_import_working">导入中…</string>
+    <string name="gateway_cert_import_success">已导入客户端证书「%1$s」</string>
+    <string name="gateway_cert_import_failed">导入失败：%1$s</string>
+    <string name="gateway_cert_error_unknown">未知错误</string>
+    <string name="gateway_cert_file_unreadable">无法读取所选文件，请换一个 .p12 文件重试</string>
+    <string name="gateway_cert_removed">已删除客户端证书</string>
+    <string name="gateway_cert_remove_failed">删除失败，请重试</string>
+    <string name="gateway_cert_label_fallback">客户端证书</string>
+
     <!-- 聊天显示：工作步骤（工具调用）详细程度 -->
     <string name="settings_section_chat">聊天显示</string>
     <string name="work_step_display_title">工作步骤展示</string>

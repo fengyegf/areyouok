@@ -88,6 +88,7 @@ import top.yukonga.miuix.kmp.icon.extended.Back
 import top.yukonga.miuix.kmp.icon.extended.ChevronForward
 import top.yukonga.miuix.kmp.icon.extended.Info
 import top.yukonga.miuix.kmp.icon.extended.Link
+import top.yukonga.miuix.kmp.icon.extended.Lock
 import top.yukonga.miuix.kmp.icon.extended.Ok
 import top.yukonga.miuix.kmp.icon.extended.Playlist
 import top.yukonga.miuix.kmp.icon.extended.Reply
@@ -97,13 +98,14 @@ import top.yukonga.miuix.kmp.icon.extended.Stopwatch
 /**
  * 设置页的分类入口。
  *
- * 根页面只展示「连接 / 网关 / 通知 / 关于」四个分类（不再把连接表单、开关直接铺开），
- * 点进去才是对应的子页；返回键在子页先回根页面，再退出设置。
+ * 根页面只展示「连接 / 网关 / 客户端证书 / 通知 / 关于」等分类入口（不再把连接表单、
+ * 开关直接铺开），点进去才是对应的子页；返回键在子页先回根页面，再退出设置。
  */
 internal enum class SettingsPage(@StringRes val titleRes: Int) {
     ROOT(R.string.settings_title),
     CONNECTION(R.string.settings_page_connection),
     GATEWAY(R.string.settings_page_gateway),
+    CLIENT_CERTS(R.string.gateway_cert_title),
     WORK_STEPS(R.string.work_step_display_title),
     TRANSLATION(R.string.settings_translation_title),
     NOTIFICATIONS(R.string.settings_page_notifications),
@@ -114,9 +116,10 @@ internal enum class SettingsPage(@StringRes val titleRes: Int) {
  * 独立设置页：全屏页面，替代原来的配对弹窗。
  *
  * 结构：
- * - 根页面：连接设备 / 网关 / 通知 / 关于四个分类入口；
+ * - 根页面：连接设备 / 网关 / 客户端证书 / 通知 / 关于分类入口；
  * - 连接页：已连接过的设备 + 连接开关，末尾「添加连接」直接唤起扫码；
  * - 网关页：自动发现同一局域网的 DSH 网关（点一下直连）+ 地址 / 配对码手动连接；
+ * - 客户端证书：公网 mTLS 使用的证书列表，支持从网关导出的 .p12 手动导入；
  * - 工作步骤显示：聊天里工具调用细节的 4 个档位（简洁 / 标准 / 详细 / 完全展开）；
  * - 思考链翻译：总开关、翻译服务（Bing / Google）、目标语言（空值跟随应用）；
  * - 通知页：气泡提醒（置顶，开启后展开「激活气泡」）、通知权限、通知总开关、审批 / 提问 / 完成提醒；
@@ -293,6 +296,8 @@ fun SettingsScreen(
                     onConnect = onConnect,
                     onClearError = onClearError,
                 )
+
+                SettingsPage.CLIENT_CERTS -> SettingsClientCertificatePage()
 
                 SettingsPage.WORK_STEPS -> SettingsWorkStepDisplayPage(
                     selected = workStepDisplay,
@@ -866,6 +871,14 @@ private fun SettingsRootPage(
                 title = stringResource(R.string.settings_root_gateway),
                 value = gatewaySummary,
                 onClick = { onOpenPage(SettingsPage.GATEWAY) },
+            )
+            // 客户端证书是公网访问的前置条件：不随连接状态隐藏，否则全新 APK
+            // 无法在公网配对前导入网关导出的 .p12（契约 A7）。
+            SettingsNavRow(
+                icon = MiuixIcons.Regular.Lock,
+                title = stringResource(R.string.gateway_cert_title),
+                description = stringResource(R.string.gateway_cert_root_desc),
+                onClick = { onOpenPage(SettingsPage.CLIENT_CERTS) },
             )
         }
 
